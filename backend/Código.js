@@ -157,6 +157,13 @@ function doPost(e) {
     if (params.action === 'delete_comment') {
       return handleDeleteComment(params.data);
     }
+    // Manutenção: roda função de manutenção sem clique no editor.
+    // ⚠️ A autenticação é o token em `data.chave`, guardado só em
+    // Propriedade do script, e a lista de funções é fechada. Ver o
+    // bloco MANUTENCAO no fim deste arquivo.
+    if (params.action === 'manutencao') {
+      return handleManutencaoInva(params.data);
+    }
     return createJsonResponse({status: 'error', message: 'Ação inválida'});
   } catch (error) {
     return createJsonResponse({status: 'error', message: error.toString()});
@@ -2257,4 +2264,212 @@ function repararDadosInva() {
   Logger.log('=== FAXINA CONCLUIDA (' + relatorio.length + ' alteracoes) ===');
   Logger.log(relatorio.length ? relatorio.join('\n') : 'nada a corrigir');
   return relatorio;
+}
+
+// ============================================================
+// MANUTENCAO (2026-08-03) - rodar manutencao sem clique no editor.
+//
+// ⚠️ `clasp run` nao funciona neste projeto (nao esta publicado como
+// "API executable"), entao instalar gatilho, gravar propriedade de
+// script ou rodar migracao exigia abrir o editor e clicar em Run. Esta
+// rota tira isso da frente: recebe o nome de uma funcao de manutencao,
+// confere um token forte e executa.
+//
+// Mesmo desenho do Manutencao.gs do Hub, e as mesmas travas:
+//   - lista FECHADA de funcoes;
+//   - token so em Propriedade do script, nunca no codigo;
+//   - sem token configurado, tudo e recusado (a mesma regra do
+//     verificarSenhaOprInva_: backend anonimo nao pode ficar aberto
+//     por esquecimento);
+//   - o token vai no CORPO do POST, nunca na query string, para nao
+//     cair em log de servidor nem no historico do terminal.
+// ============================================================
+
+var MANUTENCAO_PROP_TOKEN_INVA = 'MANUTENCAO_TOKEN';
+var MANUTENCAO_MIN_TOKEN_INVA = 32;
+
+var MANUTENCAO_FUNCOES_INVA = {
+  // Gatilhos
+  instalarAtualizacaoDiariaInva: 'Instala o gatilho diario das 05h (idempotente).',
+  listarGatilhosInva:            'Lista os gatilhos do projeto.',
+  removerGatilhosInva:           'Remove os gatilhos da sincronia.',
+
+  // Etiquetas
+  // ⚠️ Este era o passo humano pendente: cria a aba, semeia as 8
+  // etiquetas e converte o Tipo de cada instrutor em clt/eventual.
+  instalarEtiquetasInva: 'Cria a aba Etiquetas, semeia e migra o Tipo. Idempotente.',
+
+  // Sincronia com o CAVOK
+  simularReconciliacaoInva: 'Ensaio da reconciliacao: relata e NAO grava nada.',
+  reconciliarVoosInva:      'Reconcilia a janela contra o CAVOK. GRAVA.',
+
+  // Faxina e diagnostico
+  inspecionarDadosInva:    'So le: acha SALDO INICIAL que virou data.',
+  repararDadosInva:        'Desfaz o estrago do saldo virado data. GRAVA.',
+  preencherBasePadraoInva: 'Carimba SJK em quem esta sem base.',
+  diagnosticoHorasInva:    'Separa saldo inicial de linhas de voo, por instrutor.',
+  limparVoosAteInva:       'Apaga linhas de voo ate a data. Args: ["aaaa-mm-dd", true]. Sem o true e ensaio.',
+};
+
+function manutencaoTokenInva_() {
+  return PropertiesService.getScriptProperties().getProperty(MANUTENCAO_PROP_TOKEN_INVA) || '';
+}
+
+function manutencaoTokensIguaisInva_(a, b) {
+  a = String(a || '');
+  b = String(b || '');
+  if (a.length !== b.length) return false;
+  var dif = 0;
+  for (var i = 0; i < a.length; i++) dif |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return dif === 0;
+}
+
+function manutencaoMascararInva_(valor) {
+  var s = String(valor == null ? '' : valor);
+  if (!s) return '(vazio)';
+  return s.slice(0, 3) + '…' + s.slice(-2) + ' (' + s.length + ' caracteres)';
+}
+
+function manutencaoAvisarInva_(assunto, corpo) {
+  try {
+    var para = Session.getEffectiveUser().getEmail();
+    if (!para) return;
+    MailApp.sendEmail({
+      to: para,
+      subject: '[Horas INVA] Manutencao: ' + assunto,
+      body: corpo + '\n\nSe nao foi voce, rotacione o token agora.',
+      name: 'Horas Voadas INVA',
+    });
+  } catch (e) {
+    // Aviso e rede de seguranca, nao pode derrubar a operacao.
+  }
+}
+
+function manutencaoSerializarInva_(v) {
+  try {
+    return JSON.parse(JSON.stringify(v === undefined ? null : v));
+  } catch (e) {
+    return String(v);
+  }
+}
+
+function handleManutencaoInva(data) {
+  data = data || {};
+  var enviado = String(data.chave || '');
+  var gravado = manutencaoTokenInva_();
+  var op = String(data.op || 'chamar');
+
+  if (op === 'bootstrap') {
+    if (gravado) throw new Error('O token da manutencao ja existe. Use "rotacionar-token".');
+    if (enviado.length < MANUTENCAO_MIN_TOKEN_INVA) {
+      throw new Error('O token precisa de ao menos ' + MANUTENCAO_MIN_TOKEN_INVA + ' caracteres.');
+    }
+    PropertiesService.getScriptProperties().setProperty(MANUTENCAO_PROP_TOKEN_INVA, enviado);
+    manutencaoAvisarInva_('token criado', 'A rota de manutencao foi ativada e ganhou o primeiro token.');
+    return createJsonResponse({ status: 'success', data: { bootstrap: true } });
+  }
+
+  if (!gravado) throw new Error('Manutencao desativada: nao ha token configurado neste projeto.');
+  if (!manutencaoTokensIguaisInva_(enviado, gravado)) {
+    console.warn('Manutencao INVA: token recusado.');
+    throw new Error('Token de manutencao invalido.');
+  }
+
+  var props = PropertiesService.getScriptProperties();
+
+  if (op === 'catalogo') {
+    var lista = [];
+    for (var nomeFn in MANUTENCAO_FUNCOES_INVA) {
+      if (!MANUTENCAO_FUNCOES_INVA.hasOwnProperty(nomeFn)) continue;
+      lista.push({
+        funcao: nomeFn,
+        descricao: MANUTENCAO_FUNCOES_INVA[nomeFn],
+        existe: typeof globalThis[nomeFn] === 'function',
+      });
+    }
+    return createJsonResponse({ status: 'success', data: { funcoes: lista } });
+  }
+
+  if (op === 'propriedades') {
+    var todas = props.getProperties();
+    var revelar = String(data.revelar || '');
+    var fora = {};
+    for (var k in todas) {
+      if (!todas.hasOwnProperty(k)) continue;
+      fora[k] = k === revelar ? todas[k] : manutencaoMascararInva_(todas[k]);
+    }
+    return createJsonResponse({ status: 'success', data: { propriedades: fora } });
+  }
+
+  if (op === 'definir-propriedade') {
+    // ⚠️ A propriedade alvo vem em `propriedade`, nao em `chave`:
+    // `chave` ja e o token da rota, e reusar o campo trocaria o token
+    // por um valor qualquer na primeira distracao.
+    var alvoProp = String(data.propriedade || '').trim();
+    if (!alvoProp) throw new Error('Informe a propriedade em "propriedade".');
+    if (alvoProp === MANUTENCAO_PROP_TOKEN_INVA) {
+      throw new Error('Use a operacao "rotacionar-token" para trocar o token.');
+    }
+    var valor = data.valor;
+    if (valor === null || valor === undefined || valor === '') {
+      props.deleteProperty(alvoProp);
+      manutencaoAvisarInva_('propriedade apagada', 'Chave: ' + alvoProp);
+      return createJsonResponse({ status: 'success', data: { chave: alvoProp, acao: 'apagada' } });
+    }
+    var tinha = props.getProperty(alvoProp) !== null;
+    props.setProperty(alvoProp, String(valor));
+    manutencaoAvisarInva_('propriedade gravada',
+      'Chave: ' + alvoProp + '\nValor: ' + manutencaoMascararInva_(valor));
+    return createJsonResponse({
+      status: 'success',
+      data: { chave: alvoProp, acao: tinha ? 'atualizada' : 'criada' },
+    });
+  }
+
+  if (op === 'gatilhos') {
+    var gs = ScriptApp.getProjectTriggers().map(function (t) {
+      return { funcao: t.getHandlerFunction(), tipo: String(t.getEventType()), id: t.getUniqueId() };
+    });
+    return createJsonResponse({ status: 'success', data: gs });
+  }
+
+  if (op === 'rotacionar-token') {
+    var novo = String(data.novoToken || '');
+    if (novo.length < MANUTENCAO_MIN_TOKEN_INVA) {
+      throw new Error('O token novo precisa de ao menos ' + MANUTENCAO_MIN_TOKEN_INVA + ' caracteres.');
+    }
+    props.setProperty(MANUTENCAO_PROP_TOKEN_INVA, novo);
+    manutencaoAvisarInva_('token rotacionado', 'O token da rota de manutencao foi trocado.');
+    return createJsonResponse({ status: 'success', data: { ok: true } });
+  }
+
+  if (op !== 'chamar') throw new Error('Operacao de manutencao desconhecida: ' + op);
+
+  var nome = String(data.funcao || '');
+  if (!MANUTENCAO_FUNCOES_INVA.hasOwnProperty(nome)) {
+    throw new Error('Funcao fora da lista de manutencao: "' + nome + '". ' +
+      'Para liberar, acrescente em MANUTENCAO_FUNCOES_INVA.');
+  }
+  var fn = globalThis[nome];
+  if (typeof fn !== 'function') {
+    throw new Error('A funcao "' + nome + '" esta na lista mas nao existe no projeto.');
+  }
+
+  var args = Array.isArray(data.args) ? data.args : [];
+  var inicio = Date.now();
+  var retorno = fn.apply(null, args);
+
+  return createJsonResponse({
+    status: 'success',
+    data: {
+      funcao: nome,
+      args: args,
+      duracaoMs: Date.now() - inicio,
+      // ⚠️ Serializa aqui dentro. Funcao de manutencao pode devolver
+      // objeto do Apps Script (Sheet, Trigger) que o JSON.stringify do
+      // roteador nao daria conta, e a resposta viraria erro opaco
+      // DEPOIS de a funcao ja ter rodado e mudado estado.
+      retorno: manutencaoSerializarInva_(retorno),
+    },
+  });
 }
