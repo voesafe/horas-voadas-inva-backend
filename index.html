@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Horas Voadas - Painel de Controle</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="logo-container">
+            <img src="dist/logo-menor.jpeg" alt="Logo">
+        </div>
+        <ul class="nav-menu">
+            <li class="nav-item">
+                <a class="nav-link active" data-view="dashboard">Dashboard</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" data-view="cadastro">Cadastrar Instrutor</a>
+            </li>
+        </ul>
+    </aside>
+
+    <main class="main-content">
+        <!-- Dashboard View -->
+        <section id="dashboard" class="view active">
+            <header style="display: flex; justify-content: space-between; align-items: flex-start;">
+                <div>
+                    <h1>Dashboard de Horas</h1>
+                    <p>Acompanhamento de instrutores e horas sincronizadas com CAVOK.</p>
+                </div>
+                <button id="btn-sync" title="Sincronizar voos de hoje">
+                    <span>Sincronizar CAVOK</span>
+                </button>
+            </header>
+            
+            <div id="loading" style="display: none;">Carregando dados...</div>
+            
+            <div class="container" style="margin-bottom: 30px; height: 400px; position: relative;">
+                <canvas id="hoursChart"></canvas>
+            </div>
+
+            <div class="container" style="margin-top: 30px;">
+                <h2>Lista de Instrutores</h2>
+                <div class="table-container">
+                    <table id="instructor-table">
+                        <thead>
+                            <tr>
+                                <th>Nome</th>
+                                <th>Tipo</th>
+                                <th>Total de Horas</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <!-- Table rows will be injected here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Cadastro View -->
+        <section id="cadastro" class="view">
+            <header>
+                <h1>Cadastrar Novo Instrutor</h1>
+            </header>
+            <div class="container">
+                <form id="form-instrutor">
+                    <div class="form-group">
+                        <label for="nome">Nome Completo</label>
+                        <input type="text" id="nome" required placeholder="Ex: João Silva">
+                    </div>
+                    <div class="form-group">
+                        <label for="tipo">Tipo de Instrutor</label>
+                        <select id="tipo" required>
+                            <option value="">Selecione...</option>
+                            <option value="Eventual">Eventual</option>
+                            <option value="CLT">CLT</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="saldo-inicial">Banco de Horas Inicial (opcional)</label>
+                        <input type="number" id="saldo-inicial" step="0.1" placeholder="Ex: 150.5">
+                    </div>
+                    <button type="submit">Cadastrar Instrutor</button>
+                </form>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
