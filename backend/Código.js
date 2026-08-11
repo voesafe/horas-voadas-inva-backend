@@ -46,11 +46,18 @@ const INVA_ABA_ETIQUETAS = 'Etiquetas';
 const INVA_COL_ETIQUETAS = 'ETIQUETAS';
 const INVA_ETIQUETAS_HEADER = ['ID', 'NOME', 'COR', 'ORDEM'];
 // Paleta FECHADA, e o que se guarda e a CHAVE, nunca o hex. O CSS escolhe o
-// tom de cada modo: cor digitada a mao sairia ilegivel no escuro, e ninguem
-// veria isso na hora de escolher.
+// tom: cor digitada a mao sairia sem garantia de contraste, e ninguem veria
+// isso na hora de escolher.
+// Ampliada de 10 para 20 em 2026-08-11, a pedido do Victor: as etiquetas
+// eram um tom pastel (fundo translucido) e ficavam discretas demais para o
+// que uma etiqueta de qualificacao precisa fazer, que e chamar atencao. As
+// 10 originais continuam com a mesma identidade de cor (verde e verde,
+// vermelho e vermelho); so o CSS que desenha ficou mais vivido. As 10 novas
+// preenchem familias de cor que faltavam (turquesa, indigo, marrom...).
 const INVA_ETIQUETA_CORES = [
-  'verde', 'amarelo', 'laranja', 'vermelho', 'roxo',
-  'azul', 'ceu', 'limao', 'rosa', 'cinza'
+  'verde', 'limao', 'amarelo', 'mostarda', 'laranja', 'coral', 'vermelho',
+  'vinho', 'rosa', 'fucsia', 'roxo', 'indigo', 'azul', 'marinho', 'ceu',
+  'turquesa', 'oliva', 'marrom', 'preto', 'cinza'
 ];
 const INVA_ETIQUETA_COR_PADRAO = 'cinza';
 const INVA_ETIQUETA_NOME_MAX = 60;
@@ -81,6 +88,31 @@ const INVA_COMENTARIOS_HEADER = ['ID', 'INSTRUTOR', 'AUTOR', 'DATA', 'TEXTO', 'I
 // Um comentario e um recado de operacao, nao um relatorio. O teto existe para
 // a celula nao virar um documento e para a resposta do get_data nao inchar.
 const INVA_COMENTARIO_TEXTO_MAX = 1000;
+
+// ── Instrutores de SOLO (migracao do Trello, 2026-08-11) ────────────────
+// Categoria separada dos instrutores de voo: sem hora voada, sem sincronia
+// com o CAVOK, sem liberacao por OPR e sem a flag verde de 100h, porque
+// nenhuma hora e contabilizada para eles. O que sobra em comum e exatamente
+// o que a tela usa para conferencia de qualificacao: cadastro pelo Hub,
+// etiquetas (catalogo PROPRIO, por pedido do Victor: misturar com CLT/
+// Eventual/LIBERADO IFR AVIAO faria os dois seletores mostrarem etiqueta
+// que nao serve para aquele mundo), comentarios e ordem de prioridade por
+// base. Tres abas NOVAS, todas criadas sozinhas na primeira escrita — ao
+// contrario da aba Instrutores (legada, evoluiu coluna por coluna e por
+// isso usa mapaColunasInstrutores_ por NOME), estas nascem sob controle
+// total do codigo e podem usar POSICAO FIXA, no mesmo molde de Etiquetas e
+// Comentarios.
+const INVA_ABA_INSTRUTORES_SOLO = 'InstrutoresSolo';
+const INVA_INSTRUTORES_SOLO_HEADER = ['NOME', 'BASE', 'ETIQUETAS', 'ORDEM_PRIORIDADE'];
+const INVA_SOLO_COL_NOME = 1;
+const INVA_SOLO_COL_BASE = 2;
+const INVA_SOLO_COL_ETIQUETAS = 3;
+const INVA_SOLO_COL_ORDEM = 4;
+// Catalogo proprio, mesmo formato de Etiquetas (reusa INVA_ETIQUETAS_HEADER
+// e a mesma paleta de cores). Sem semente: a operacao recria do zero o que
+// tinha no Trello, e nao ha CLT/Eventual para migrar aqui.
+const INVA_ABA_ETIQUETAS_SOLO = 'EtiquetasSolo';
+const INVA_ABA_COMENTARIOS_SOLO = 'ComentariosSolo';
 
 // Senha do botao LIBERADO POR OPR. O valor real fica na Propriedade do script
 // LIBERACAO_OPR_SENHA (Configuracoes do projeto -> Propriedades do script),
@@ -156,6 +188,32 @@ function doPost(e) {
     }
     if (params.action === 'delete_comment') {
       return handleDeleteComment(params.data);
+    }
+    // Instrutores de solo: mesmo formato de rota, mundo separado (sem
+    // CAVOK, sem OPR, sem meta de horas). Ver o bloco INSTRUTORES DE SOLO.
+    if (params.action === 'add_instructor_solo') {
+      return handleAddInstructorSolo(params.data);
+    }
+    if (params.action === 'set_instructor_base_solo') {
+      return handleSetInstructorBaseSolo(params.data);
+    }
+    if (params.action === 'set_instructor_order_solo') {
+      return handleSetInstructorOrderSolo(params.data);
+    }
+    if (params.action === 'save_label_solo') {
+      return handleSaveLabelSolo(params.data);
+    }
+    if (params.action === 'delete_label_solo') {
+      return handleDeleteLabelSolo(params.data);
+    }
+    if (params.action === 'set_instructor_labels_solo') {
+      return handleSetInstructorLabelsSolo(params.data);
+    }
+    if (params.action === 'add_comment_solo') {
+      return handleAddCommentSolo(params.data);
+    }
+    if (params.action === 'delete_comment_solo') {
+      return handleDeleteCommentSolo(params.data);
     }
     // Manutenção: roda função de manutenção sem clique no editor.
     // ⚠️ A autenticação é o token em `data.chave`, guardado só em
@@ -1922,6 +1980,577 @@ function handleDeleteComment(data) {
   }
 }
 
+// ============================================================
+// INSTRUTORES DE SOLO — sem CAVOK, sem OPR, sem meta de horas
+//
+// Tres abas novas (InstrutoresSolo, EtiquetasSolo, ComentariosSolo), cada
+// uma nascendo sozinha na primeira ESCRITA. Leitura nunca cria aba: e o
+// mesmo cuidado das abas Etiquetas/Comentarios do mundo de voo, porque
+// leitura que escreve e escrita disfarcada e duas cargas de tela ao mesmo
+// tempo criariam a aba duas vezes.
+// ============================================================
+
+/** A aba de instrutores de solo, criada com cabecalho quando criar=true. */
+function abaInstrutoresSoloInva_(ss, criar) {
+  let aba = ss.getSheetByName(INVA_ABA_INSTRUTORES_SOLO);
+  if (aba || !criar) return aba;
+  aba = ss.insertSheet(INVA_ABA_INSTRUTORES_SOLO);
+  aba.getRange(1, 1, 1, INVA_INSTRUTORES_SOLO_HEADER.length)
+    .setValues([INVA_INSTRUTORES_SOLO_HEADER])
+    .setFontWeight('bold');
+  aba.setFrozenRows(1);
+  return aba;
+}
+
+/** Numero da linha do instrutor de solo, ou 0 se nao existir (ou aba ausente). */
+function linhaDoInstrutorSoloInva_(sheet, nome) {
+  const chave = String(nome || '').trim().toUpperCase();
+  if (!chave || !sheet) return 0;
+  const linhas = sheet.getDataRange().getValues();
+  for (let i = 1; i < linhas.length; i++) {
+    if (String(linhas[i][0] || '').trim().toUpperCase() === chave) return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * Maior posicao ja usada numa base, para quem chega (cadastro novo ou
+ * mudanca de base) entrar no FIM da fila. Mesma logica de
+ * ultimaOrdemDaBaseInva_, adaptada para colunas fixas.
+ */
+function ultimaOrdemDaBaseSoloInva_(sheet, base) {
+  if (!sheet) return 0;
+  const linhas = sheet.getDataRange().getValues();
+  let maior = 0;
+  for (let i = 1; i < linhas.length; i++) {
+    if (!String(linhas[i][0] || '').trim()) continue;
+    const daLinha = normalizarBaseInva_(linhas[i][INVA_SOLO_COL_BASE - 1]) || INVA_BASE_PADRAO;
+    if (daLinha !== base) continue;
+    const ordem = Number(linhas[i][INVA_SOLO_COL_ORDEM - 1]) || 0;
+    if (ordem > maior) maior = ordem;
+  }
+  return maior;
+}
+
+/** A aba do catalogo de solo, criada com cabecalho quando criar=true. */
+function abaEtiquetasSoloInva_(ss, criar) {
+  let aba = ss.getSheetByName(INVA_ABA_ETIQUETAS_SOLO);
+  if (aba || !criar) return aba;
+  aba = ss.insertSheet(INVA_ABA_ETIQUETAS_SOLO);
+  aba.getRange(1, 1, 1, INVA_ETIQUETAS_HEADER.length)
+    .setValues([INVA_ETIQUETAS_HEADER])
+    .setFontWeight('bold');
+  aba.setFrozenRows(1);
+  return aba;
+}
+
+/** Le o catalogo de solo. Aba ausente devolve lista vazia SEM criar nada. */
+function lerEtiquetasSoloInva_(ss) {
+  const aba = abaEtiquetasSoloInva_(ss, false);
+  if (!aba) return [];
+  const linhas = aba.getDataRange().getValues().slice(1);
+  const lista = [];
+  linhas.forEach(function (linha, i) {
+    const id = String(linha[0] || '').trim();
+    const nome = String(linha[1] || '').trim();
+    if (!id || !nome) return;
+    lista.push({
+      id: id,
+      nome: nome,
+      cor: normalizarCorEtiquetaInva_(linha[2]),
+      ordem: Number(linha[3]) || (i + 1)
+    });
+  });
+  lista.sort(function (a, b) { return a.ordem - b.ordem; });
+  return lista;
+}
+
+/** Reescreve a aba de etiquetas de solo inteira a partir da lista. */
+function gravarEtiquetasSoloInva_(ss, lista) {
+  const aba = abaEtiquetasSoloInva_(ss, true);
+  const ultima = aba.getLastRow();
+  if (ultima > 1) aba.getRange(2, 1, ultima - 1, INVA_ETIQUETAS_HEADER.length).clearContent();
+  if (!lista.length) return;
+  const valores = lista.map(function (etiqueta, i) {
+    return [etiqueta.id, etiqueta.nome, etiqueta.cor, i + 1];
+  });
+  // Formato de texto antes do valor, mesma armadilha do catalogo de voo.
+  const faixa = aba.getRange(2, 1, valores.length, INVA_ETIQUETAS_HEADER.length);
+  faixa.setNumberFormat('@');
+  faixa.setValues(valores);
+}
+
+/** A aba de comentarios de solo, criada com cabecalho quando criar=true. */
+function abaComentariosSoloInva_(ss, criar) {
+  let aba = ss.getSheetByName(INVA_ABA_COMENTARIOS_SOLO);
+  if (aba || !criar) return aba;
+  aba = ss.insertSheet(INVA_ABA_COMENTARIOS_SOLO);
+  aba.getRange(1, 1, 1, INVA_COMENTARIOS_HEADER.length)
+    .setValues([INVA_COMENTARIOS_HEADER])
+    .setFontWeight('bold');
+  aba.setFrozenRows(1);
+  return aba;
+}
+
+/** Le os comentarios de solo. Mesma logica de lerComentariosInva_. */
+function lerComentariosSoloInva_(ss) {
+  const aba = abaComentariosSoloInva_(ss, false);
+  if (!aba) return {};
+  const linhas = aba.getDataRange().getDisplayValues().slice(1);
+  const porInstrutor = {};
+
+  linhas.forEach(function (linha, i) {
+    const id = String(linha[0] || '').trim();
+    const instrutor = String(linha[1] || '').trim();
+    const texto = String(linha[4] || '');
+    if (!id || !instrutor || !texto.trim()) return;
+    const chave = chaveInstrutorInva_(instrutor);
+    if (!porInstrutor[chave]) porInstrutor[chave] = [];
+    porInstrutor[chave].push({
+      id: id,
+      autor: String(linha[2] || '').trim(),
+      data: String(linha[3] || '').trim(),
+      texto: texto,
+      iso: String(linha[5] || '').trim(),
+      _ordem: i
+    });
+  });
+
+  Object.keys(porInstrutor).forEach(function (chave) {
+    porInstrutor[chave].sort(function (a, b) {
+      if (a.iso && b.iso && a.iso !== b.iso) return a.iso < b.iso ? -1 : 1;
+      return a._ordem - b._ordem;
+    });
+    porInstrutor[chave].forEach(function (comentario) { delete comentario._ordem; });
+  });
+
+  return porInstrutor;
+}
+
+/**
+ * Monta {instrutores, etiquetas} de solo para o handleGetData. So leitura,
+ * nao cria aba nenhuma: enquanto ninguem cadastrou o primeiro instrutor de
+ * solo, sai tudo vazio e a tela mostra a lista vazia, nao um erro.
+ */
+function instrutoresSoloParaTela_(ss) {
+  const catalogo = lerEtiquetasSoloInva_(ss);
+  const sheet = abaInstrutoresSoloInva_(ss, false);
+  if (!sheet) return {instrutores: [], etiquetas: catalogo};
+
+  const comentarios = lerComentariosSoloInva_(ss);
+  const linhas = sheet.getDataRange().getValues().slice(1);
+  const instrutores = [];
+  linhas.forEach(function (linha) {
+    const nome = String(linha[0] || '').trim();
+    if (!nome) return;
+    instrutores.push({
+      nome: nome,
+      base: normalizarBaseInva_(linha[INVA_SOLO_COL_BASE - 1]) || INVA_BASE_PADRAO,
+      etiquetas: sanearEtiquetasInva_(linha[INVA_SOLO_COL_ETIQUETAS - 1], catalogo),
+      comentarios: comentarios[chaveInstrutorInva_(nome)] || [],
+      ordem: Number(linha[INVA_SOLO_COL_ORDEM - 1]) || 0
+    });
+  });
+  return {instrutores: instrutores, etiquetas: catalogo};
+}
+
+function handleAddInstructorSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    // Mesmo motivo do add_instructor de voo: sem a trava, dois cliques
+    // seguidos rodam em paralelo e os dois inserem.
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Informe o nome do instrutor.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = abaInstrutoresSoloInva_(ss, true);
+
+    const chave = nome.toUpperCase();
+    const jaExiste = instSheet.getDataRange().getValues().slice(1)
+      .some(function (row) { return String(row[0] || '').trim().toUpperCase() === chave; });
+    if (jaExiste) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Já existe um instrutor de solo cadastrado com o nome "' + nome + '".'
+      });
+    }
+
+    const baseNova = normalizarBaseInva_(data.base) || INVA_BASE_PADRAO;
+    // Ordem ANTES de gravar a base, mesma razao da versao de voo: com a base
+    // ja gravada a propria linha nova entraria na contagem do destino.
+    const ordemNova = ultimaOrdemDaBaseSoloInva_(instSheet, baseNova) + 1;
+    const catalogo = lerEtiquetasSoloInva_(ss);
+    const ids = sanearEtiquetasInva_(data.etiquetas, catalogo);
+
+    // Nome pelo appendRow; BASE e ETIQUETAS depois, por gravarTextoInva_
+    // (formato de texto ANTES do valor). ORDEM e numero puro.
+    instSheet.appendRow([nome, '', '', ordemNova]);
+    const linhaNova = instSheet.getLastRow();
+    gravarTextoInva_(instSheet, linhaNova, INVA_SOLO_COL_BASE, baseNova);
+    gravarTextoInva_(instSheet, linhaNova, INVA_SOLO_COL_ETIQUETAS, ids.join(','));
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({status: 'success'});
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+function handleSetInstructorBaseSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    const base = normalizarBaseInva_((data || {}).base);
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Informe o instrutor.'});
+    }
+    if (!base) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Base inválida. Use ' + INVA_BASES.join(' ou ') + '.'
+      });
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = abaInstrutoresSoloInva_(ss, true);
+    const linha = linhaDoInstrutorSoloInva_(instSheet, nome);
+    if (!linha) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Instrutor de solo "' + nome + '" não encontrado na planilha.'
+      });
+    }
+
+    const ordem = ultimaOrdemDaBaseSoloInva_(instSheet, base) + 1;
+    gravarTextoInva_(instSheet, linha, INVA_SOLO_COL_BASE, base);
+    instSheet.getRange(linha, INVA_SOLO_COL_ORDEM).setValue(ordem);
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({
+      status: 'success',
+      data: {nome: nome, base: base, ordem: ordem}
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+/** Reordena UMA base de solo. Mesma logica de handleSetInstructorOrder. */
+function handleSetInstructorOrderSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const base = normalizarBaseInva_((data || {}).base);
+    const nomes = Array.isArray((data || {}).nomes) ? (data || {}).nomes : null;
+    if (!base) {
+      return createJsonResponse({status: 'error', message: 'Base inválida.'});
+    }
+    if (!nomes || !nomes.length) {
+      return createJsonResponse({status: 'error', message: 'Informe a ordem dos instrutores.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = abaInstrutoresSoloInva_(ss, true);
+
+    // Resolve TODAS as linhas antes de escrever qualquer uma, mesmo cuidado
+    // da versao de voo: um nome errado no meio deixaria a base pela metade.
+    const alvos = [];
+    for (let i = 0; i < nomes.length; i++) {
+      const nome = String(nomes[i] || '').trim();
+      const linha = nome ? linhaDoInstrutorSoloInva_(instSheet, nome) : 0;
+      if (!linha) {
+        return createJsonResponse({
+          status: 'error',
+          message: 'Instrutor de solo "' + nome + '" não encontrado na planilha.'
+        });
+      }
+      alvos.push({nome: nome, linha: linha});
+    }
+
+    alvos.forEach(function (alvo, i) {
+      instSheet.getRange(alvo.linha, INVA_SOLO_COL_BASE).setValue(base);
+      instSheet.getRange(alvo.linha, INVA_SOLO_COL_ORDEM).setValue(i + 1);
+    });
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({
+      status: 'success',
+      data: {
+        base: base,
+        ordem: alvos.map(function (alvo, i) { return {nome: alvo.nome, ordem: i + 1}; })
+      }
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+function handleSaveLabelSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Dê um nome para a etiqueta.'});
+    }
+    if (nome.length > INVA_ETIQUETA_NOME_MAX) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'O nome da etiqueta passa de ' + INVA_ETIQUETA_NOME_MAX + ' caracteres.'
+      });
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const catalogo = lerEtiquetasSoloInva_(ss);
+    const id = String((data || {}).id || '').trim();
+    const cor = normalizarCorEtiquetaInva_((data || {}).cor);
+
+    const chave = nome.toUpperCase();
+    const repetida = catalogo.some(function (etiqueta) {
+      return etiqueta.id !== id && etiqueta.nome.trim().toUpperCase() === chave;
+    });
+    if (repetida) {
+      return createJsonResponse({status: 'error', message: 'Já existe uma etiqueta com esse nome.'});
+    }
+
+    if (id) {
+      const alvo = catalogo.filter(function (e) { return e.id === id; })[0];
+      if (!alvo) {
+        return createJsonResponse({status: 'error', message: 'Etiqueta não encontrada.'});
+      }
+      alvo.nome = nome;
+      alvo.cor = cor;
+    } else {
+      const usados = catalogo.map(function (e) { return e.id; });
+      catalogo.push({
+        id: novoIdEtiquetaInva_(usados),
+        nome: nome,
+        cor: cor,
+        ordem: catalogo.length + 1
+      });
+    }
+
+    gravarEtiquetasSoloInva_(ss, catalogo);
+    SpreadsheetApp.flush();
+    return createJsonResponse({status: 'success', data: {etiquetas: catalogo}});
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+function handleDeleteLabelSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const id = String((data || {}).id || '').trim();
+    if (!id) {
+      return createJsonResponse({status: 'error', message: 'Informe a etiqueta.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const catalogo = lerEtiquetasSoloInva_(ss);
+    const restante = catalogo.filter(function (etiqueta) { return etiqueta.id !== id; });
+    if (restante.length === catalogo.length) {
+      return createJsonResponse({status: 'error', message: 'Etiqueta não encontrada.'});
+    }
+
+    gravarEtiquetasSoloInva_(ss, restante);
+
+    // Limpa o id orfao de quem tinha a etiqueta, senao ela reaparece como
+    // chip fantasma se alguem recriar uma etiqueta com o mesmo id.
+    const instSheet = abaInstrutoresSoloInva_(ss, false);
+    let limpos = 0;
+    if (instSheet) {
+      const linhas = instSheet.getDataRange().getValues();
+      for (let i = 1; i < linhas.length; i++) {
+        if (!String(linhas[i][0] || '').trim()) continue;
+        const atuais = parseEtiquetasInva_(linhas[i][INVA_SOLO_COL_ETIQUETAS - 1]);
+        if (atuais.indexOf(id) < 0) continue;
+        const novos = atuais.filter(function (item) { return item !== id; });
+        gravarTextoInva_(instSheet, i + 1, INVA_SOLO_COL_ETIQUETAS, novos.join(','));
+        limpos++;
+      }
+    }
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({
+      status: 'success',
+      data: {etiquetas: restante, instrutoresAtualizados: limpos}
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+function handleSetInstructorLabelsSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Informe o instrutor.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = abaInstrutoresSoloInva_(ss, true);
+    const linha = linhaDoInstrutorSoloInva_(instSheet, nome);
+    if (!linha) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Instrutor de solo "' + nome + '" não encontrado na planilha.'
+      });
+    }
+
+    const catalogo = lerEtiquetasSoloInva_(ss);
+    const ids = sanearEtiquetasInva_((data || {}).etiquetas, catalogo);
+    // Sem espelho de Tipo aqui: a aba de solo nao tem essa coluna, e o
+    // vinculo CLT/Eventual e exclusivo dos instrutores de voo.
+    gravarTextoInva_(instSheet, linha, INVA_SOLO_COL_ETIQUETAS, ids.join(','));
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({status: 'success', data: {nome: nome, etiquetas: ids}});
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+function handleAddCommentSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    const texto = String((data || {}).texto || '').trim();
+    const autor = String((data || {}).autor || '').trim();
+
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Informe o instrutor.'});
+    }
+    if (!texto) {
+      return createJsonResponse({status: 'error', message: 'Escreva o comentário antes de salvar.'});
+    }
+    if (texto.length > INVA_COMENTARIO_TEXTO_MAX) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'O comentário passa de ' + INVA_COMENTARIO_TEXTO_MAX + ' caracteres. Resuma ou divida em dois.'
+      });
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = abaInstrutoresSoloInva_(ss, false);
+    if (!instSheet || !linhaDoInstrutorSoloInva_(instSheet, nome)) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Instrutor de solo "' + nome + '" não encontrado na planilha.'
+      });
+    }
+
+    const porInstrutor = lerComentariosSoloInva_(ss);
+    const aba = abaComentariosSoloInva_(ss, true);
+    const agora = new Date();
+    const linha = [
+      novoIdComentarioInva_(idsComentariosInva_(porInstrutor)),
+      nome,
+      autor,
+      Utilities.formatDate(agora, INVA_FUSO, 'dd/MM/yyyy HH:mm'),
+      texto,
+      Utilities.formatDate(agora, INVA_FUSO, "yyyy-MM-dd'T'HH:mm:ss.SSS")
+    ];
+
+    const destino = aba.getRange(aba.getLastRow() + 1, 1, 1, INVA_COMENTARIOS_HEADER.length);
+    destino.setNumberFormat('@');
+    destino.setValues([linha]);
+
+    SpreadsheetApp.flush();
+    const atualizados = lerComentariosSoloInva_(ss)[chaveInstrutorInva_(nome)] || [];
+    return createJsonResponse({
+      status: 'success',
+      data: {nome: nome, comentarios: atualizados}
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+function handleDeleteCommentSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const id = String((data || {}).id || '').trim();
+    const autor = String((data || {}).autor || '').trim();
+    if (!id) {
+      return createJsonResponse({status: 'error', message: 'Informe o comentário.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const aba = abaComentariosSoloInva_(ss, false);
+    if (!aba) {
+      return createJsonResponse({status: 'error', message: 'Comentário não encontrado.'});
+    }
+
+    const linhas = aba.getDataRange().getDisplayValues();
+    let alvo = 0;
+    let dono = '';
+    let nome = '';
+    for (let i = 1; i < linhas.length; i++) {
+      if (String(linhas[i][0] || '').trim() !== id) continue;
+      alvo = i + 1;
+      nome = String(linhas[i][1] || '').trim();
+      dono = String(linhas[i][2] || '').trim();
+      break;
+    }
+    if (!alvo) {
+      return createJsonResponse({status: 'error', message: 'Comentário não encontrado.'});
+    }
+
+    // Mesma trava contra apagar comentario de outra pessoa por engano, nao
+    // controle de acesso, mesma nota da versao de voo.
+    if (dono && chaveInstrutorInva_(dono) !== chaveInstrutorInva_(autor)) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Só quem escreveu o comentário pode apagá-lo.'
+      });
+    }
+
+    aba.deleteRow(alvo);
+    SpreadsheetApp.flush();
+    const atualizados = lerComentariosSoloInva_(ss)[chaveInstrutorInva_(nome)] || [];
+    return createJsonResponse({
+      status: 'success',
+      data: {nome: nome, comentarios: atualizados}
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
 function handleGetData() {
   try {
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
@@ -1970,13 +2599,26 @@ function handleGetData() {
       };
     });
 
+    // Instrutores de solo viajam na MESMA resposta, pelo mesmo motivo do
+    // catalogo e dos comentarios acima: com ~10s de latencia, uma rota
+    // propria so para eles dobraria a espera da tela abrir. Um backend
+    // antigo (sem esta secao) nao manda `dataSolo`, e o frontend detecta
+    // isso e some com a aba em vez de quebrar.
+    const solo = instrutoresSoloParaTela_(ss);
+
     return createJsonResponse({
       status: 'success',
       data: instructorData,
+      dataSolo: solo.instrutores,
       // O catalogo viaja junto com os dados de proposito: com ~10s de
       // latencia, uma segunda rota so para as etiquetas dobraria a espera da
       // tela abrir.
-      meta: { bases: INVA_BASES, metaHoras: INVA_META_HORAS, etiquetas: catalogo }
+      meta: {
+        bases: INVA_BASES,
+        metaHoras: INVA_META_HORAS,
+        etiquetas: catalogo,
+        etiquetasSolo: solo.etiquetas
+      }
     });
   } catch (error) {
     return createJsonResponse({ status: 'error', message: error.toString() });
