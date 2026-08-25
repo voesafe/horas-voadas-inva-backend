@@ -1134,10 +1134,46 @@ function invaClassificarFaseMissao_(missaoTexto) {
 }
 
 /**
+ * Decimo de hora (1 casa) a partir de minutos inteiros, arredondando para o
+ * mais proximo e, no empate exato (resto 3 na divisao por 6: minutos que
+ * terminam em 3 ou 7 na casa de tempo, tipo 27min = 0,45h), para BAIXO.
+ *
+ * Medido contra o relatorio real do CAVOK em 2026-08-25 (Danilo Lira,
+ * agosto/2026, 15 voos VFR): o `Math.round` padrao (arredonda empate pra
+ * CIMA) so bate 11 dos 15, porque o CAVOK arredonda esses empates pra
+ * baixo. Com esta regra, batem 14 dos 15 — o unico que sobra e um voo de
+ * navegacao com 3 pousos, que o CAVOK mostra abaixo do que a formula daria
+ * (aparentemente um tratamento proprio dele pra perna multipla, que a API
+ * de voos nao da pra reproduzir sozinha).
+ *
+ * Aritmetica inteira de proposito: nunca compara minutos/60 em ponto
+ * flutuante contra 0,5 exato, que e onde esse tipo de checagem costuma
+ * falhar por imprecisao.
+ *
+ * ⚠️ Local desta funcao, NAO reusa `arredondarUmaCasa` (arredonda pra
+ * cima no empate): aquela e usada pelo Fechamento de Horas / Cotistas e
+ * pela reconciliacao da aba Horas, e mudar a regra la mudaria numero ja
+ * aceito em outro modulo sem ninguem ter pedido.
+ */
+function invaDecimoHoraCavok_(minutos) {
+  var m = Math.max(0, Math.round(Number(minutos) || 0));
+  var q = Math.floor(m / 6);
+  var r = m % 6;
+  return r > 3 ? q + 1 : q;
+}
+
+/**
  * Horas voadas do mes por instrutor, separadas em VFR/IFR/Simulador, com a
  * lista de voos que compõe cada categoria: é o que sustenta a auditoria
  * ("Ver voos") do Fechamento de Horas / Instrutores no Hub: sem o detalhe
  * por voo não dá pra conferir por que um valor saiu do jeito que saiu.
+ *
+ * ⚠️ O total soma o DECIMO já arredondado de cada voo, não os minutos
+ * brutos com um arredondamento só no fim. É assim que o CAVOK soma o dele
+ * (confirmado voo a voo): somar minutos brutos e arredondar uma vez só
+ * bate diferente do relatório de origem, mesmo usando a mesma regra de
+ * empate.
+ *
  * So leitura. `ano`/`mes` obrigatorios (mesma validacao do get_month).
  */
 function handleGetHorasCategoriaInva(ano, mes) {
@@ -1151,18 +1187,19 @@ function handleGetHorasCategoriaInva(ano, mes) {
       if (!nome) return;
       var chave = invaChaveTexto_(nome);
       if (!porInstrutor[chave]) {
-        porInstrutor[chave] = { instrutor: nome, vfrMin: 0, ifrMin: 0, simuladorMin: 0, voos: [] };
+        porInstrutor[chave] = { instrutor: nome, vfrDecimos: 0, ifrDecimos: 0, simuladorDecimos: 0, voos: [] };
       }
       var minutos = Math.max(0, Number(voo['Tempo total de voo']) || 0);
       var categoria = invaClassificarFaseMissao_(voo.Missao);
-      if (categoria === 'SIMULADOR') porInstrutor[chave].simuladorMin += minutos;
-      else if (categoria === 'IFR') porInstrutor[chave].ifrMin += minutos;
-      else porInstrutor[chave].vfrMin += minutos;
+      var decimo = invaDecimoHoraCavok_(minutos);
+      if (categoria === 'SIMULADOR') porInstrutor[chave].simuladorDecimos += decimo;
+      else if (categoria === 'IFR') porInstrutor[chave].ifrDecimos += decimo;
+      else porInstrutor[chave].vfrDecimos += decimo;
 
       porInstrutor[chave].voos.push({
         data: voo.Data,
         categoria: categoria,
-        horas: arredondarUmaCasa(minutos / 60),
+        horas: decimo / 10,
         aeronave: voo.Aeronave || '',
         missao: voo.Missao || ''
       });
@@ -1175,9 +1212,9 @@ function handleGetHorasCategoriaInva(ano, mes) {
       });
       return {
         instrutor: item.instrutor,
-        vfrHoras: arredondarUmaCasa(item.vfrMin / 60),
-        ifrHoras: arredondarUmaCasa(item.ifrMin / 60),
-        simuladorHoras: arredondarUmaCasa(item.simuladorMin / 60),
+        vfrHoras: item.vfrDecimos / 10,
+        ifrHoras: item.ifrDecimos / 10,
+        simuladorHoras: item.simuladorDecimos / 10,
         voos: voosOrdenados
       };
     });
