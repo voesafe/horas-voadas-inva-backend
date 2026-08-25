@@ -37,6 +37,12 @@ const INVA_COL_LIBERADO_POR = 'LIBERADO_POR';
 // da lista, nao para o comeco: instrutor recem-cadastrado nao pode virar a
 // primeira chamada por omissao.
 const INVA_COL_ORDEM = 'ORDEM_PRIORIDADE';
+// Nome(s) que o CAVOK usa para o instrutor quando difere do cadastro (ex:
+// so o primeiro nome, sem sobrenome). Varios separados por virgula. Medido
+// em 2026-08-25: "Luan Santana" no cadastro, "LUAN" no campo Instrutor dos
+// voos, e a junta por nome exato deixava as horas dele sempre em zero no
+// Fechamento de Horas / Instrutores. Vazio = usa so o nome do cadastro.
+const INVA_COL_APELIDOS_CAVOK = 'APELIDOS_CAVOK';
 
 // ── Etiquetas (molde Trello) ────────────────────────────────────────────
 // O catalogo vive numa aba propria e cada instrutor guarda uma LISTA de ids
@@ -1141,7 +1147,7 @@ function invaClassificarFaseMissao_(missaoTexto) {
  * Medido contra o relatorio real do CAVOK em 2026-08-25 (Danilo Lira,
  * agosto/2026, 15 voos VFR): o `Math.round` padrao (arredonda empate pra
  * CIMA) so bate 11 dos 15, porque o CAVOK arredonda esses empates pra
- * baixo. Com esta regra, batem 14 dos 15 — o unico que sobra e um voo de
+ * baixo. Com esta regra, batem 14 dos 15: o unico que sobra e um voo de
  * navegacao com 3 pousos, que o CAVOK mostra abaixo do que a formula daria
  * (aparentemente um tratamento proprio dele pra perna multipla, que a API
  * de voos nao da pra reproduzir sozinha).
@@ -1155,6 +1161,53 @@ function invaClassificarFaseMissao_(missaoTexto) {
  * pela reconciliacao da aba Horas, e mudar a regra la mudaria numero ja
  * aceito em outro modulo sem ninguem ter pedido.
  */
+/**
+ * Mapa "nome como o CAVOK grava" (normalizado) -> nome do cadastro, lido da
+ * coluna APELIDOS_CAVOK (varios separados por virgula). So leitura, nunca
+ * cria a coluna: enquanto ela nao existir, o mapa sai vazio e cada voo usa
+ * o proprio nome cru do CAVOK, exatamente o comportamento de antes.
+ */
+function invaApelidosCavok_() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = ss.getSheetByName('Instrutores');
+  var colunas = mapaColunasInstrutores_(sheet, false);
+  var colApelidos = colunas[INVA_COL_APELIDOS_CAVOK];
+  var mapa = {};
+  if (!colApelidos) return mapa;
+
+  var dados = sheet.getDataRange().getValues();
+  for (var i = 1; i < dados.length; i++) {
+    var nomeCanonico = String(dados[i][0] || '').trim();
+    if (!nomeCanonico) continue;
+    String(dados[i][colApelidos - 1] || '').split(',').forEach(function (apelido) {
+      var chave = invaChaveTexto_(apelido);
+      if (chave) mapa[chave] = nomeCanonico;
+    });
+  }
+  return mapa;
+}
+
+/**
+ * Manutencao: grava o(s) apelido(s) que o CAVOK usa para um instrutor
+ * (coluna APELIDOS_CAVOK, criada se faltar), para quando o campo Instrutor
+ * dos voos nao bate com o nome do cadastro. Args: [nomeCanonico, "apelido1,
+ * apelido2"]. Nao mexe em nenhum outro instrutor nem em nenhuma outra
+ * coluna.
+ */
+function invaDefinirApelidoCavok(nomeCanonico, apelidos) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = ss.getSheetByName('Instrutores');
+  var colunas = mapaColunasInstrutores_(sheet, true);
+  var dados = sheet.getDataRange().getValues();
+  var chaveAlvo = invaChaveTexto_(nomeCanonico);
+  for (var i = 1; i < dados.length; i++) {
+    if (invaChaveTexto_(dados[i][0]) !== chaveAlvo) continue;
+    sheet.getRange(i + 1, colunas[INVA_COL_APELIDOS_CAVOK]).setValue(String(apelidos || '').trim());
+    return { ok: true, linha: i + 1, instrutor: dados[i][0], apelidos: apelidos };
+  }
+  return { ok: false, motivo: 'Instrutor "' + nomeCanonico + '" nao encontrado no cadastro.' };
+}
+
 function invaDecimoHoraCavok_(minutos) {
   var m = Math.max(0, Math.round(Number(minutos) || 0));
   var q = Math.floor(m / 6);
@@ -1180,11 +1233,17 @@ function handleGetHorasCategoriaInva(ano, mes) {
   try {
     var competencia = validarCompetencia(ano, mes);
     var flights = buscarVoosMes(competencia.ano, competencia.mes);
+    var apelidos = invaApelidosCavok_();
 
     var porInstrutor = {};
     flights.forEach(function (voo) {
-      var nome = String(voo.Instrutor || '').trim();
-      if (!nome) return;
+      var nomeCru = String(voo.Instrutor || '').trim();
+      if (!nomeCru) return;
+      // Resolve pelo apelido cadastrado ANTES de agrupar: sem isso, um
+      // instrutor cujo nome no CAVOK nao bate com o cadastro (ex: so o
+      // primeiro nome) fica com as horas dele presas numa chave que o
+      // Fechamento de Horas / Instrutores nunca vai olhar.
+      var nome = apelidos[invaChaveTexto_(nomeCru)] || nomeCru;
       var chave = invaChaveTexto_(nome);
       if (!porInstrutor[chave]) {
         porInstrutor[chave] = { instrutor: nome, vfrDecimos: 0, ifrDecimos: 0, simuladorDecimos: 0, voos: [] };
@@ -1327,7 +1386,7 @@ function mapaColunasInstrutores_(sheet, criar) {
 
   let proxima = largura;
   [INVA_COL_BASE, INVA_COL_LIBERADO, INVA_COL_LIBERADO_EM, INVA_COL_LIBERADO_POR,
-   INVA_COL_ETIQUETAS, INVA_COL_ORDEM]
+   INVA_COL_ETIQUETAS, INVA_COL_ORDEM, INVA_COL_APELIDOS_CAVOK]
     .forEach(function (coluna) {
       if (mapa[coluna]) return;
       proxima++;
@@ -3136,6 +3195,7 @@ var MANUTENCAO_FUNCOES_INVA = {
 
   // Fechamento de Horas / Instrutores
   handleGetHorasCategoriaInva: 'SO LEITURA. Horas do mes por instrutor em VFR/IFR/Simulador. Args: [ano, mes].',
+  invaDefinirApelidoCavok: 'GRAVA. Apelido(s) que o CAVOK usa pro instrutor. Args: ["Nome Cadastro", "apelido1, apelido2"].',
 };
 
 function manutencaoTokenInva_() {
