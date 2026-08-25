@@ -154,6 +154,10 @@ function doGet(e) {
     return handleSyncCavok(e.parameter.date);
   } else if (action === 'get_month') {
     return handleGetMonth(e.parameter.ano, e.parameter.mes);
+  } else if (action === 'get_horas_categoria') {
+    // Fechamento de Horas / Instrutores (Hub): horas do mes por instrutor,
+    // separadas em VFR/IFR/Simulador pela Fase do campo Missao. So leitura.
+    return handleGetHorasCategoriaInva(e.parameter.ano, e.parameter.mes);
   }
   
   return createJsonResponse({status: 'error', message: 'Ação inválida'});
@@ -1048,6 +1052,147 @@ function normalizarAeronave(valor) {
 
 function arredondarUmaCasa(valor) {
   return Math.round((Number(valor) || 0) * 10) / 10;
+}
+
+// ============================================================
+// FECHAMENTO DE HORAS / INSTRUTORES (2026-08-25)
+//
+// Separa as horas voadas do mes por categoria de pagamento (VFR / IFR /
+// Simulador), a partir do campo Missao do CAVOK, formato confirmado por
+// sonda real: "[curso] > [Fase] > [Missao]". A Fase (segundo pedaco) e
+// o que decide a categoria.
+//
+// So leitura, sem gravar nada: reusa buscarVoosMes/validarCompetencia
+// (mesmo mecanismo do get_month dos Cotistas) em vez de tocar na aba
+// Horas ou na reconciliacao, que sao fragéis e cheias de invariantes.
+//
+// ⚠️ NAO reaproveita INVA_AERONAVES_EXCLUIDAS (SM-SJK/SM-CPQ ficam de
+// fora dali para nao contar simulador na meta de 100h). Aqui e o
+// oposto: SM-SJK/SM-CPQ sao provavelmente onde o simulador aparece, e
+// excluir por aeronave zeraria a categoria Simulador. A classificacao
+// e so pela Fase, para TODO voo do instrutor no mes.
+// ============================================================
+
+/**
+ * Fases que pagam como Simulador e como IFR. Qualquer Fase fora das duas
+ * listas (ou ausente/ilegivel) paga como VFR: e a regra literal dada pela
+ * operacao, nao uma lista fechada de VFR: nao ha "fase inesperada" aqui,
+ * so a lista SIM/IFR e o resto.
+ *
+ * ⚠️ Comparar pela Fase INTEIRA normalizada, nunca por palavra-chave: "Fase
+ * 3B-3 - SIM Multi Crew" tem "SIM" no nome mas paga como IFR, nao Simulador.
+ */
+var INVA_FASES_SIMULADOR_BRUTO = [
+  'Fase 3A - Mockup SIM IFR',
+  'Fase 3A-1 - Manobras Básicas (FSTD)',
+  'Fase 3A-2 - Uso de Rádio-Navegação (FSTD)',
+  'Fase 3A-3 - Procedimentos IFR (FSTD)',
+  'Fase 3A-4 - Contingências IFR (FSTD)',
+  'Fase 3A-5 - Navegações IFR (FSTD)',
+  'Avaliação Intermediária em FSTD'
+];
+var INVA_FASES_IFR_BRUTO = [
+  'Fase 3B-1 - Manobras Básicas',
+  'Fase 3B-2 - Navegações e Procedimentos IFR',
+  'Fase 3B-3 - SIM Multi Crew',
+  'Avaliação final para cheque ANAC'
+];
+
+/**
+ * Normaliza texto de Fase para comparacao: maiusculas, espacos colapsados
+ * e qualquer variante de travessao/meia-risca reduzida a hifen comum.
+ * Medido contra o CAVOK real (2026-08-25): a mesma API grava uma Fase com
+ * travessão ("Fase 2B – Preparação...") e outras com hifen comum
+ * ("Fase 3A - Mockup..."), entao nao dá pra confiar no tipo de traço.
+ */
+function invaNormalizarFaseTexto_(texto) {
+  return String(texto || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[‐-―−]/g, '-');
+}
+
+var INVA_FASES_SIMULADOR = INVA_FASES_SIMULADOR_BRUTO.map(invaNormalizarFaseTexto_);
+var INVA_FASES_IFR = INVA_FASES_IFR_BRUTO.map(invaNormalizarFaseTexto_);
+
+/** Extrai o segundo pedaco de "[curso] > [Fase] > [Missao]". '' se nao houver. */
+function invaExtrairFaseMissao_(missaoTexto) {
+  var partes = String(missaoTexto || '').split('>');
+  if (partes.length < 2) return '';
+  return partes[1].trim();
+}
+
+/** 'SIMULADOR' | 'IFR' | 'VFR', pela Fase do campo Missao do voo. */
+function invaClassificarFaseMissao_(missaoTexto) {
+  var fase = invaExtrairFaseMissao_(missaoTexto);
+  if (!fase) return 'VFR';
+  var chave = invaNormalizarFaseTexto_(fase);
+  if (INVA_FASES_SIMULADOR.indexOf(chave) >= 0) return 'SIMULADOR';
+  if (INVA_FASES_IFR.indexOf(chave) >= 0) return 'IFR';
+  return 'VFR';
+}
+
+/**
+ * Horas voadas do mes por instrutor, separadas em VFR/IFR/Simulador, com a
+ * lista de voos que compõe cada categoria: é o que sustenta a auditoria
+ * ("Ver voos") do Fechamento de Horas / Instrutores no Hub: sem o detalhe
+ * por voo não dá pra conferir por que um valor saiu do jeito que saiu.
+ * So leitura. `ano`/`mes` obrigatorios (mesma validacao do get_month).
+ */
+function handleGetHorasCategoriaInva(ano, mes) {
+  try {
+    var competencia = validarCompetencia(ano, mes);
+    var flights = buscarVoosMes(competencia.ano, competencia.mes);
+
+    var porInstrutor = {};
+    flights.forEach(function (voo) {
+      var nome = String(voo.Instrutor || '').trim();
+      if (!nome) return;
+      var chave = invaChaveTexto_(nome);
+      if (!porInstrutor[chave]) {
+        porInstrutor[chave] = { instrutor: nome, vfrMin: 0, ifrMin: 0, simuladorMin: 0, voos: [] };
+      }
+      var minutos = Math.max(0, Number(voo['Tempo total de voo']) || 0);
+      var categoria = invaClassificarFaseMissao_(voo.Missao);
+      if (categoria === 'SIMULADOR') porInstrutor[chave].simuladorMin += minutos;
+      else if (categoria === 'IFR') porInstrutor[chave].ifrMin += minutos;
+      else porInstrutor[chave].vfrMin += minutos;
+
+      porInstrutor[chave].voos.push({
+        data: voo.Data,
+        categoria: categoria,
+        horas: arredondarUmaCasa(minutos / 60),
+        aeronave: voo.Aeronave || '',
+        missao: voo.Missao || ''
+      });
+    });
+
+    var instrutores = Object.keys(porInstrutor).map(function (chave) {
+      var item = porInstrutor[chave];
+      var voosOrdenados = item.voos.slice().sort(function (a, b) {
+        return String(a.data).localeCompare(String(b.data));
+      });
+      return {
+        instrutor: item.instrutor,
+        vfrHoras: arredondarUmaCasa(item.vfrMin / 60),
+        ifrHoras: arredondarUmaCasa(item.ifrMin / 60),
+        simuladorHoras: arredondarUmaCasa(item.simuladorMin / 60),
+        voos: voosOrdenados
+      };
+    });
+
+    return createJsonResponse({
+      status: 'success',
+      data: { ano: competencia.ano, mes: competencia.mes, instrutores: instrutores }
+    });
+  } catch (error) {
+    console.error(error.toString());
+    return createJsonResponse({
+      status: 'error',
+      message: 'Falha ao consultar horas por categoria: ' + error.toString()
+    });
+  }
 }
 
 function consolidarFechamento(flights) {
@@ -2951,6 +3096,9 @@ var MANUTENCAO_FUNCOES_INVA = {
   preencherBasePadraoInva: 'Carimba SJK em quem esta sem base.',
   diagnosticoHorasInva:    'Separa saldo inicial de linhas de voo, por instrutor.',
   limparVoosAteInva:       'Apaga linhas de voo ate a data. Args: ["aaaa-mm-dd", true]. Sem o true e ensaio.',
+
+  // Fechamento de Horas / Instrutores
+  handleGetHorasCategoriaInva: 'SO LEITURA. Horas do mes por instrutor em VFR/IFR/Simulador. Args: [ano, mes].',
 };
 
 function manutencaoTokenInva_() {
