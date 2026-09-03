@@ -1090,32 +1090,75 @@ function arredondarUmaCasa(valor) {
 }
 
 // ============================================================
-// FECHAMENTO DE HORAS / INSTRUTORES (2026-08-25)
+// FECHAMENTO DE HORAS / INSTRUTORES (2026-08-25, regra por equipamento
+// desde 2026-09-03)
 //
-// Separa as horas voadas do mes por categoria de pagamento (VFR / IFR /
-// Simulador), a partir do campo Missao do CAVOK, formato confirmado por
-// sonda real: "[curso] > [Fase] > [Missao]". A Fase (segundo pedaco) e
-// o que decide a categoria.
+// Separa as horas voadas do mes nas quatro categorias de pagamento:
+// VFR, IFR, Simulador AATD e Simulador PCATD.
+//
+// ⚠️⚠️ QUEM DECIDE SE E SIMULADOR E O EQUIPAMENTO (campo Aeronave), NAO
+// o texto da Fase. A primeira versao classificava por uma lista fechada
+// de nomes de fase, e medido em 2026-09-03 contra junho+julho+agosto isso
+// deixava 240,7 HORAS de simulador sendo pagas como VFR (R$70): o CAVOK
+// usa mais de dez textos de fase diferentes para simulador ("Simulador
+// IFR", "Treinamento em Simulador", "Fase 1 - Mockup / Simulador",
+// "Fase 2C - Navegacao"...), e nenhuma lista acompanha isso. O campo
+// Aeronave, ao contrario, e factual: PC-SJK/PC-CPQ sao o PCATD e
+// SM-SJK/SM-CPQ sao o AATD, o que bateu 100% nos tres meses conferidos.
+//
+// A regra, por decisao do financeiro em 2026-09-03:
+//   1. Voo em equipamento de simulador paga simulador, com PRECEDENCIA
+//      sobre as listas de fase (inclusive sobre as fases 3B, que antes
+//      caiam em IFR).
+//   2. PCATD paga menos que AATD (R$45 contra R$60), EXCETO os LAB IFR da
+//      "Fase 3A - Mockup SIM IFR", que pagam AATD mesmo rodando no PCATD.
+//   3. As fases de INVA_FASES_LANCAMENTO_INDEVIDO ficam fora do simulador:
+//      sao lancamento errado no CAVOK, a corrigir na origem.
 //
 // So leitura, sem gravar nada: reusa buscarVoosMes/validarCompetencia
 // (mesmo mecanismo do get_month dos Cotistas) em vez de tocar na aba
 // Horas ou na reconciliacao, que sao fragéis e cheias de invariantes.
 //
 // ⚠️ NAO reaproveita INVA_AERONAVES_EXCLUIDAS (SM-SJK/SM-CPQ ficam de
-// fora dali para nao contar simulador na meta de 100h). Aqui e o
-// oposto: SM-SJK/SM-CPQ sao provavelmente onde o simulador aparece, e
-// excluir por aeronave zeraria a categoria Simulador. A classificacao
-// e so pela Fase, para TODO voo do instrutor no mes.
+// fora dali para nao contar simulador na meta de 100h). Aqui e o oposto:
+// e exatamente nesses equipamentos que o simulador acontece.
 // ============================================================
 
+/** Categorias de pagamento. SIMULADOR = AATD (nome mantido: e a chave do historico de valores no Hub). */
+var INVA_CAT_VFR = 'VFR';
+var INVA_CAT_IFR = 'IFR';
+var INVA_CAT_SIM_AATD = 'SIMULADOR';
+var INVA_CAT_SIM_PCATD = 'SIMULADOR_PCATD';
+
+/** Prefixo da matricula do equipamento -> tipo de simulador. */
+var INVA_PREFIXO_PCATD = 'PC-';
+var INVA_PREFIXO_AATD = 'SM-';
+
 /**
- * Fases que pagam como Simulador e como IFR. Qualquer Fase fora das duas
- * listas (ou ausente/ilegivel) paga como VFR: e a regra literal dada pela
- * operacao, nao uma lista fechada de VFR: nao ha "fase inesperada" aqui,
- * so a lista SIM/IFR e o resto.
+ * Fases que, num equipamento de simulador, sao lancamento errado no CAVOK e
+ * NAO devem pagar simulador (decisao do financeiro em 2026-09-03). Elas caem
+ * na regra normal (lista IFR, senao VFR), que e o que ja acontecia antes.
  *
- * ⚠️ Comparar pela Fase INTEIRA normalizada, nunca por palavra-chave: "Fase
- * 3B-3 - SIM Multi Crew" tem "SIM" no nome mas paga como IFR, nao Simulador.
+ * ⚠️ Esta lista existe para ENCOLHER: cada nome aqui e um lancamento a
+ * corrigir na origem. Sao ~28h em tres meses.
+ */
+var INVA_FASES_LANCAMENTO_INDEVIDO_BRUTO = [
+  'Treinamento de Voo',
+  'Treinamento Safe',
+  'Fase 2A - Pré Solo',
+  'Cheque Final - FAP',
+  'Readaptação'
+];
+
+/** A fase dos LAB IFR: paga AATD mesmo quando roda no PCATD. */
+var INVA_FASE_MOCKUP_SIM_IFR_BRUTO = 'Fase 3A - Mockup SIM IFR';
+
+/**
+ * Fases de simulador, mantidas apenas como REDE DE SEGURANCA para o caso de
+ * um voo de simulador ser lancado com matricula de aviao de verdade: a fase
+ * diz FSTD, entao paga AATD. Nos tres meses conferidos isso nunca aconteceu
+ * (nenhum voo classificado simulador estava fora de PC- ou SM-), e o
+ * equipamento tem precedencia sobre esta lista.
  */
 var INVA_FASES_SIMULADOR_BRUTO = [
   'Fase 3A - Mockup SIM IFR',
@@ -1126,6 +1169,15 @@ var INVA_FASES_SIMULADOR_BRUTO = [
   'Fase 3A-5 - Navegações IFR (FSTD)',
   'Avaliação Intermediária em FSTD'
 ];
+
+/**
+ * Fases que pagam IFR quando o voo NAO foi em equipamento de simulador.
+ *
+ * ⚠️ Comparar pela Fase INTEIRA normalizada, nunca por palavra-chave: "Fase
+ * 3B-3 - SIM Multi Crew" tem "SIM" no nome. Desde 2026-09-03 essa fase paga
+ * simulador quando roda no simulador (o equipamento manda), e IFR quando
+ * roda no aviao, que e o que esta lista cobre.
+ */
 var INVA_FASES_IFR_BRUTO = [
   'Fase 3B-1 - Manobras Básicas',
   'Fase 3B-2 - Navegações e Procedimentos IFR',
@@ -1150,6 +1202,8 @@ function invaNormalizarFaseTexto_(texto) {
 
 var INVA_FASES_SIMULADOR = INVA_FASES_SIMULADOR_BRUTO.map(invaNormalizarFaseTexto_);
 var INVA_FASES_IFR = INVA_FASES_IFR_BRUTO.map(invaNormalizarFaseTexto_);
+var INVA_FASES_LANCAMENTO_INDEVIDO = INVA_FASES_LANCAMENTO_INDEVIDO_BRUTO.map(invaNormalizarFaseTexto_);
+var INVA_FASE_MOCKUP_SIM_IFR = invaNormalizarFaseTexto_(INVA_FASE_MOCKUP_SIM_IFR_BRUTO);
 
 /** Extrai o segundo pedaco de "[curso] > [Fase] > [Missao]". '' se nao houver. */
 function invaExtrairFaseMissao_(missaoTexto) {
@@ -1158,14 +1212,38 @@ function invaExtrairFaseMissao_(missaoTexto) {
   return partes[1].trim();
 }
 
-/** 'SIMULADOR' | 'IFR' | 'VFR', pela Fase do campo Missao do voo. */
-function invaClassificarFaseMissao_(missaoTexto) {
-  var fase = invaExtrairFaseMissao_(missaoTexto);
-  if (!fase) return 'VFR';
-  var chave = invaNormalizarFaseTexto_(fase);
-  if (INVA_FASES_SIMULADOR.indexOf(chave) >= 0) return 'SIMULADOR';
-  if (INVA_FASES_IFR.indexOf(chave) >= 0) return 'IFR';
-  return 'VFR';
+/**
+ * Tipo de simulador pela matricula do equipamento: 'PCATD', 'AATD' ou ''
+ * (nao e simulador). Reusa o `normalizarAeronave`, que ja resolve as
+ * variantes com o nome da cidade entre parenteses.
+ */
+function invaEquipamentoSimulador_(aeronave) {
+  var matricula = normalizarAeronave(aeronave);
+  if (matricula.indexOf(INVA_PREFIXO_PCATD) === 0) return 'PCATD';
+  if (matricula.indexOf(INVA_PREFIXO_AATD) === 0) return 'AATD';
+  return '';
+}
+
+/**
+ * Categoria de pagamento de um voo: VFR, IFR, SIMULADOR (AATD) ou
+ * SIMULADOR_PCATD. Ver o bloco de comentario no topo desta secao para o
+ * porque de o equipamento ter precedencia sobre a Fase.
+ */
+function invaClassificarVooPagamento_(aeronave, missaoTexto) {
+  var chaveFase = invaNormalizarFaseTexto_(invaExtrairFaseMissao_(missaoTexto));
+  var equipamento = invaEquipamentoSimulador_(aeronave);
+  var lancamentoIndevido = chaveFase && INVA_FASES_LANCAMENTO_INDEVIDO.indexOf(chaveFase) >= 0;
+
+  if (equipamento && !lancamentoIndevido) {
+    // Os LAB IFR pagam AATD mesmo rodando no PCATD.
+    if (equipamento === 'PCATD' && chaveFase === INVA_FASE_MOCKUP_SIM_IFR) return INVA_CAT_SIM_AATD;
+    return equipamento === 'PCATD' ? INVA_CAT_SIM_PCATD : INVA_CAT_SIM_AATD;
+  }
+
+  // Fora de equipamento de simulador (ou lancamento indevido): regra por Fase.
+  if (chaveFase && INVA_FASES_SIMULADOR.indexOf(chaveFase) >= 0) return INVA_CAT_SIM_AATD;
+  if (chaveFase && INVA_FASES_IFR.indexOf(chaveFase) >= 0) return INVA_CAT_IFR;
+  return INVA_CAT_VFR;
 }
 
 /**
@@ -1275,13 +1353,18 @@ function handleGetHorasCategoriaInva(ano, mes) {
       var nome = apelidos[invaChaveTexto_(nomeCru)] || nomeCru;
       var chave = invaChaveTexto_(nome);
       if (!porInstrutor[chave]) {
-        porInstrutor[chave] = { instrutor: nome, vfrDecimos: 0, ifrDecimos: 0, simuladorDecimos: 0, voos: [] };
+        porInstrutor[chave] = {
+          instrutor: nome,
+          vfrDecimos: 0, ifrDecimos: 0, simuladorDecimos: 0, simuladorPcatdDecimos: 0,
+          voos: []
+        };
       }
       var minutos = Math.max(0, Number(voo['Tempo total de voo']) || 0);
-      var categoria = invaClassificarFaseMissao_(voo.Missao);
+      var categoria = invaClassificarVooPagamento_(voo.Aeronave, voo.Missao);
       var decimo = invaDecimoHoraCavok_(minutos);
-      if (categoria === 'SIMULADOR') porInstrutor[chave].simuladorDecimos += decimo;
-      else if (categoria === 'IFR') porInstrutor[chave].ifrDecimos += decimo;
+      if (categoria === INVA_CAT_SIM_PCATD) porInstrutor[chave].simuladorPcatdDecimos += decimo;
+      else if (categoria === INVA_CAT_SIM_AATD) porInstrutor[chave].simuladorDecimos += decimo;
+      else if (categoria === INVA_CAT_IFR) porInstrutor[chave].ifrDecimos += decimo;
       else porInstrutor[chave].vfrDecimos += decimo;
 
       porInstrutor[chave].voos.push({
@@ -1302,7 +1385,11 @@ function handleGetHorasCategoriaInva(ano, mes) {
         instrutor: item.instrutor,
         vfrHoras: item.vfrDecimos / 10,
         ifrHoras: item.ifrDecimos / 10,
+        // `simuladorHoras` = AATD. Nome mantido porque e a chave do
+        // historico de valores gravado no Hub: renomear orfanaria o que
+        // ja foi registrado.
         simuladorHoras: item.simuladorDecimos / 10,
+        simuladorPcatdHoras: item.simuladorPcatdDecimos / 10,
         voos: voosOrdenados
       };
     });
