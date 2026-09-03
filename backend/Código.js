@@ -1112,8 +1112,26 @@ function arredondarUmaCasa(valor) {
 //      caiam em IFR).
 //   2. PCATD paga menos que AATD (R$45 contra R$60), EXCETO os LAB IFR da
 //      "Fase 3A - Mockup SIM IFR", que pagam AATD mesmo rodando no PCATD.
-//   3. As fases de INVA_FASES_LANCAMENTO_INDEVIDO ficam fora do simulador:
-//      sao lancamento errado no CAVOK, a corrigir na origem.
+//
+// ⚠️⚠️ NAO EXISTE LISTA DE FASE QUE TIRE UM VOO DO SIMULADOR, e uma
+// tentativa disso foi removida em 2026-09-03 depois de errar em
+// producao. A primeira versao supunha que certas fases num equipamento
+// de simulador eram lancamento errado no CAVOK (Pre Solo, Treinamento
+// de Voo, Cheque Final - FAP, Readaptacao, Treinamento Safe) e as
+// mandava de volta para VFR. Medido contra 1187 voos de junho a
+// setembro: eram 30,7h de simulador de verdade pagas como VFR, entre
+// elas uma missao chamada literalmente "Treinamento em SM-AATD", que
+// nomeia o proprio equipamento. E **todas** aquelas fases aparecem
+// TAMBEM em aviao de verdade ("Treinamento Safe > Aperfeicoamento
+// Continuo" tem 11,9h em simulador e 44,6h em aviao), o que prova que
+// o nome da fase nao carrega informacao nenhuma sobre o equipamento.
+//
+// Matricula brasileira e PP/PR/PS/PT/PU, entao `PC-` e `SM-` NUNCA
+// podem ser aviao: nos 1187 voos os avioes eram todos PS-* e PT-*.
+// Se um dia um voo de aviao de verdade aparecer lancado como SM-CPQ,
+// ele paga simulador e o conserto e no CAVOK, na origem: e melhor
+// pagar de menos um lancamento errado (e o instrutor reclamar) do que
+// pagar de mais uma sessao de simulador de verdade em silencio.
 //
 // So leitura, sem gravar nada: reusa buscarVoosMes/validarCompetencia
 // (mesmo mecanismo do get_month dos Cotistas) em vez de tocar na aba
@@ -1133,22 +1151,6 @@ var INVA_CAT_SIM_PCATD = 'SIMULADOR_PCATD';
 /** Prefixo da matricula do equipamento -> tipo de simulador. */
 var INVA_PREFIXO_PCATD = 'PC-';
 var INVA_PREFIXO_AATD = 'SM-';
-
-/**
- * Fases que, num equipamento de simulador, sao lancamento errado no CAVOK e
- * NAO devem pagar simulador (decisao do financeiro em 2026-09-03). Elas caem
- * na regra normal (lista IFR, senao VFR), que e o que ja acontecia antes.
- *
- * ⚠️ Esta lista existe para ENCOLHER: cada nome aqui e um lancamento a
- * corrigir na origem. Sao ~28h em tres meses.
- */
-var INVA_FASES_LANCAMENTO_INDEVIDO_BRUTO = [
-  'Treinamento de Voo',
-  'Treinamento Safe',
-  'Fase 2A - Pré Solo',
-  'Cheque Final - FAP',
-  'Readaptação'
-];
 
 /** A fase dos LAB IFR: paga AATD mesmo quando roda no PCATD. */
 var INVA_FASE_MOCKUP_SIM_IFR_BRUTO = 'Fase 3A - Mockup SIM IFR';
@@ -1202,7 +1204,6 @@ function invaNormalizarFaseTexto_(texto) {
 
 var INVA_FASES_SIMULADOR = INVA_FASES_SIMULADOR_BRUTO.map(invaNormalizarFaseTexto_);
 var INVA_FASES_IFR = INVA_FASES_IFR_BRUTO.map(invaNormalizarFaseTexto_);
-var INVA_FASES_LANCAMENTO_INDEVIDO = INVA_FASES_LANCAMENTO_INDEVIDO_BRUTO.map(invaNormalizarFaseTexto_);
 var INVA_FASE_MOCKUP_SIM_IFR = invaNormalizarFaseTexto_(INVA_FASE_MOCKUP_SIM_IFR_BRUTO);
 
 /** Extrai o segundo pedaco de "[curso] > [Fase] > [Missao]". '' se nao houver. */
@@ -1232,15 +1233,17 @@ function invaEquipamentoSimulador_(aeronave) {
 function invaClassificarVooPagamento_(aeronave, missaoTexto) {
   var chaveFase = invaNormalizarFaseTexto_(invaExtrairFaseMissao_(missaoTexto));
   var equipamento = invaEquipamentoSimulador_(aeronave);
-  var lancamentoIndevido = chaveFase && INVA_FASES_LANCAMENTO_INDEVIDO.indexOf(chaveFase) >= 0;
 
-  if (equipamento && !lancamentoIndevido) {
+  // ⚠️ Nenhuma fase tira o voo daqui: o equipamento e o unico sinal
+  // factual, e a lista de excecao que existia aqui errou em producao (ver
+  // o bloco de comentario no topo desta secao).
+  if (equipamento) {
     // Os LAB IFR pagam AATD mesmo rodando no PCATD.
     if (equipamento === 'PCATD' && chaveFase === INVA_FASE_MOCKUP_SIM_IFR) return INVA_CAT_SIM_AATD;
     return equipamento === 'PCATD' ? INVA_CAT_SIM_PCATD : INVA_CAT_SIM_AATD;
   }
 
-  // Fora de equipamento de simulador (ou lancamento indevido): regra por Fase.
+  // Fora de equipamento de simulador: regra por Fase.
   if (chaveFase && INVA_FASES_SIMULADOR.indexOf(chaveFase) >= 0) return INVA_CAT_SIM_AATD;
   if (chaveFase && INVA_FASES_IFR.indexOf(chaveFase) >= 0) return INVA_CAT_IFR;
   return INVA_CAT_VFR;
