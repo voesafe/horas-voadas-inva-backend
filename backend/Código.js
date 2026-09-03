@@ -37,6 +37,18 @@ const INVA_COL_LIBERADO_POR = 'LIBERADO_POR';
 // da lista, nao para o comeco: instrutor recem-cadastrado nao pode virar a
 // primeira chamada por omissao.
 const INVA_COL_ORDEM = 'ORDEM_PRIORIDADE';
+// Instrutor que saiu da escola. NAO e remocao: a linha fica na aba e as horas
+// seguem na aba Horas, senao o historico de quem voou de verdade se perderia e
+// a reconciliacao do CAVOK continuaria trazendo voo dele sem ninguem para
+// casar. Celula VAZIA significa ATIVO, e e isso que dispensa migracao: os
+// instrutores que ja estavam cadastrados seguem todos ativos sem tocar em nada.
+const INVA_COL_INATIVO = 'INATIVO';
+const INVA_COL_INATIVO_EM = 'INATIVO_EM';
+const INVA_COL_INATIVO_POR = 'INATIVO_POR';
+// O motivo e opcional, mas e o unico campo que responde "por que esse nome
+// saiu da lista" seis meses depois. Data e autor sao automaticos.
+const INVA_COL_INATIVO_MOTIVO = 'INATIVO_MOTIVO';
+const INVA_MOTIVO_INATIVO_MAX = 200;
 
 // ── Etiquetas (molde Trello) ────────────────────────────────────────────
 // O catalogo vive numa aba propria e cada instrutor guarda uma LISTA de ids
@@ -103,11 +115,22 @@ const INVA_COMENTARIO_TEXTO_MAX = 1000;
 // total do codigo e podem usar POSICAO FIXA, no mesmo molde de Etiquetas e
 // Comentarios.
 const INVA_ABA_INSTRUTORES_SOLO = 'InstrutoresSolo';
-const INVA_INSTRUTORES_SOLO_HEADER = ['NOME', 'BASE', 'ETIQUETAS', 'ORDEM_PRIORIDADE'];
+// ⚠️ As 4 colunas de inativacao entraram DEPOIS, no fim: a aba ja existe em
+// producao com 4 colunas, e como aqui a leitura e por POSICAO, inserir no meio
+// desalinharia todas as linhas gravadas. Quem reconcilia o cabecalho da aba que
+// ja existe e garantirCabecalhoSoloInva_, chamado so nas ESCRITAS.
+const INVA_INSTRUTORES_SOLO_HEADER = [
+  'NOME', 'BASE', 'ETIQUETAS', 'ORDEM_PRIORIDADE',
+  'INATIVO', 'INATIVO_EM', 'INATIVO_POR', 'INATIVO_MOTIVO'
+];
 const INVA_SOLO_COL_NOME = 1;
 const INVA_SOLO_COL_BASE = 2;
 const INVA_SOLO_COL_ETIQUETAS = 3;
 const INVA_SOLO_COL_ORDEM = 4;
+const INVA_SOLO_COL_INATIVO = 5;
+const INVA_SOLO_COL_INATIVO_EM = 6;
+const INVA_SOLO_COL_INATIVO_POR = 7;
+const INVA_SOLO_COL_INATIVO_MOTIVO = 8;
 // Catalogo proprio, mesmo formato de Etiquetas (reusa INVA_ETIQUETAS_HEADER
 // e a mesma paleta de cores). Sem semente: a operacao recria do zero o que
 // tinha no Trello, e nao ha CLT/Eventual para migrar aqui.
@@ -174,6 +197,9 @@ function doPost(e) {
     if (params.action === 'set_instructor_order') {
       return handleSetInstructorOrder(params.data);
     }
+    if (params.action === 'set_instructor_active') {
+      return handleSetInstructorActive(params.data);
+    }
     if (params.action === 'save_label') {
       return handleSaveLabel(params.data);
     }
@@ -199,6 +225,9 @@ function doPost(e) {
     }
     if (params.action === 'set_instructor_order_solo') {
       return handleSetInstructorOrderSolo(params.data);
+    }
+    if (params.action === 'set_instructor_active_solo') {
+      return handleSetInstructorActiveSolo(params.data);
     }
     if (params.action === 'save_label_solo') {
       return handleSaveLabelSolo(params.data);
@@ -1143,15 +1172,29 @@ function mapaColunasInstrutores_(sheet, criar) {
 
   if (!criar) return mapa;
 
+  const esperadas = [
+    INVA_COL_BASE, INVA_COL_LIBERADO, INVA_COL_LIBERADO_EM, INVA_COL_LIBERADO_POR,
+    INVA_COL_ETIQUETAS, INVA_COL_ORDEM,
+    INVA_COL_INATIVO, INVA_COL_INATIVO_EM, INVA_COL_INATIVO_POR,
+    INVA_COL_INATIVO_MOTIVO
+  ];
+  const novas = esperadas.filter(function (coluna) { return !mapa[coluna]; });
+  if (!novas.length) return mapa;
+
+  // ⚠️ Escrever fora do fim da ABA lanca, e nao ha ninguem para pegar o erro:
+  // a aba tem 26 colunas por padrao e usa 8, entao na pratica sobra folga, mas
+  // basta alguem ter apagado as colunas vazias para a PRIMEIRA inativacao ser
+  // quem descobre isso. Alargar antes custa nada e a chamada e no-op quando ja
+  // ha espaco.
+  const faltam = (largura + novas.length) - sheet.getMaxColumns();
+  if (faltam > 0) sheet.insertColumnsAfter(sheet.getMaxColumns(), faltam);
+
   let proxima = largura;
-  [INVA_COL_BASE, INVA_COL_LIBERADO, INVA_COL_LIBERADO_EM, INVA_COL_LIBERADO_POR,
-   INVA_COL_ETIQUETAS, INVA_COL_ORDEM]
-    .forEach(function (coluna) {
-      if (mapa[coluna]) return;
-      proxima++;
-      sheet.getRange(1, proxima).setValue(coluna);
-      mapa[coluna] = proxima;
-    });
+  novas.forEach(function (coluna) {
+    proxima++;
+    sheet.getRange(1, proxima).setValue(coluna);
+    mapa[coluna] = proxima;
+  });
   return mapa;
 }
 
@@ -1162,13 +1205,28 @@ function normalizarBaseInva_(valor) {
 }
 
 /**
- * A liberacao e gravada como booleano, mas alguem pode ter digitado "SIM" na
- * celula a mao. Aceitar as duas formas evita liberacao que some da tela.
+ * Le uma celula de SIM/NAO. O codigo grava booleano, mas alguem pode ter
+ * digitado "SIM" ou "x" a mao: aceitar as duas formas evita marca que existe na
+ * planilha e nao aparece na tela.
+ *
+ * ⚠️ Celula vazia e FALSO. Vale para a liberacao por OPR (nao liberado) e para
+ * a inativacao (ativo), e e o que permite as duas colunas nascerem sem
+ * migracao nenhuma.
  */
-function liberacaoInvaAtiva_(valor) {
+function invaCelulaVerdadeira_(valor) {
   if (valor === true) return true;
   const texto = String(valor || '').trim().toUpperCase();
   return ['TRUE', 'VERDADEIRO', 'SIM', 'X', '1'].indexOf(texto) >= 0;
+}
+
+/** Nome historico, mantido porque e o que o resto do arquivo chama. */
+function liberacaoInvaAtiva_(valor) {
+  return invaCelulaVerdadeira_(valor);
+}
+
+/** Instrutor fora da operacao. Coluna ausente ou celula vazia = ativo. */
+function inativoInva_(valor) {
+  return invaCelulaVerdadeira_(valor);
 }
 
 /** Numero da linha do instrutor na aba, ou 0 se nao existir. */
@@ -1204,14 +1262,19 @@ function verificarSenhaOprInva_(senha) {
  * Maior posicao ja usada numa base. Serve para quem chega (cadastro novo ou
  * mudanca de base) entrar no FIM da fila de prioridade em vez de aparecer no
  * meio dela por acaso.
+ *
+ * ⚠️ `ignorarLinha` existe para a REATIVACAO: o instrutor que volta ainda tem
+ * o numero velho na celula, e sem exclui-lo do maximo ele herdaria a posicao de
+ * si mesmo e saltaria a fila inteira justamente quem esteve fora.
  */
-function ultimaOrdemDaBaseInva_(sheet, colunas, base) {
+function ultimaOrdemDaBaseInva_(sheet, colunas, base, ignorarLinha) {
   const colBase = colunas[INVA_COL_BASE];
   const colOrdem = colunas[INVA_COL_ORDEM];
   if (!colBase || !colOrdem) return 0;
   const linhas = sheet.getDataRange().getValues();
   let maior = 0;
   for (let i = 1; i < linhas.length; i++) {
+    if (ignorarLinha && (i + 1) === ignorarLinha) continue;
     if (!String(linhas[i][0] || '').trim()) continue;
     const daLinha = normalizarBaseInva_(linhas[i][colBase - 1]) || INVA_BASE_PADRAO;
     if (daLinha !== base) continue;
@@ -1385,6 +1448,88 @@ function handleSetInstructorRelease(data) {
         liberadoOpr: liberar,
         liberadoEm: quando,
         liberadoPor: liberar ? autor : ''
+      }
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+/**
+ * Inativa ou reativa um instrutor de voo.
+ *
+ * ⚠️ Nao apaga NADA. A linha continua na aba Instrutores e as horas seguem na
+ * aba Horas. Apagar a linha perderia o historico de quem voou de verdade, e a
+ * reconciliacao do CAVOK continuaria inserindo os voos antigos dele na aba
+ * Horas sem instrutor para casar. Inativo e um ESTADO, nunca uma remocao.
+ *
+ * ⚠️ A ORDEM DE PRIORIDADE nao e tocada ao inativar: buraco na numeracao e
+ * inofensivo e esperado (ver handleSetInstructorOrder). Na REATIVACAO o
+ * instrutor entra no FIM da fila, mesma regra de quem chega pelo cadastro ou
+ * pela troca de base. Duas razoes: quem saiu e voltou nao deve reaparecer como
+ * primeira chamada por causa de um numero velho na celula, e o numero velho
+ * pode ter sido reaproveitado por outra pessoa enquanto ele esteve fora.
+ */
+function handleSetInstructorActive(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    // ⚠️ Default explicito: `inativo` ausente NAO pode virar inativacao por
+    // omissao. Precisa chegar exatamente true.
+    const inativar = (data || {}).inativo === true;
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Informe o instrutor.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = ss.getSheetByName('Instrutores');
+    const linha = linhaDoInstrutorInva_(instSheet, nome);
+    if (!linha) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Instrutor "' + nome + '" não encontrado na planilha.'
+      });
+    }
+
+    const colunas = mapaColunasInstrutores_(instSheet, true);
+    const autor = String((data || {}).autor || '').trim();
+    const motivo = String((data || {}).motivo || '')
+      .trim().substring(0, INVA_MOTIVO_INATIVO_MAX);
+    const quando = inativar
+      ? Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm')
+      : '';
+
+    instSheet.getRange(linha, colunas[INVA_COL_INATIVO]).setValue(inativar);
+    gravarTextoInva_(instSheet, linha, colunas[INVA_COL_INATIVO_EM], quando);
+    gravarTextoInva_(instSheet, linha, colunas[INVA_COL_INATIVO_POR], inativar ? autor : '');
+    gravarTextoInva_(instSheet, linha, colunas[INVA_COL_INATIVO_MOTIVO], inativar ? motivo : '');
+
+    let ordem = 0;
+    if (!inativar) {
+      const base = normalizarBaseInva_(
+        instSheet.getRange(linha, colunas[INVA_COL_BASE]).getValue()
+      ) || INVA_BASE_PADRAO;
+      // ignorarLinha: sem excluir a propria linha do maximo, o numero velho
+      // dela venceria e o instrutor voltaria para a frente da fila.
+      ordem = ultimaOrdemDaBaseInva_(instSheet, colunas, base, linha) + 1;
+      instSheet.getRange(linha, colunas[INVA_COL_ORDEM]).setValue(ordem);
+    }
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({
+      status: 'success',
+      data: {
+        nome: nome,
+        inativo: inativar,
+        inativoEm: quando,
+        inativoPor: inativar ? autor : '',
+        inativoMotivo: inativar ? motivo : '',
+        // Zero na inativacao: a tela sabe que nao houve mudanca de posicao.
+        ordem: ordem
       }
     });
   } catch (error) {
@@ -1990,9 +2135,36 @@ function handleDeleteComment(data) {
 // tempo criariam a aba duas vezes.
 // ============================================================
 
+/**
+ * Reconcilia o cabecalho da aba de solo com INVA_INSTRUTORES_SOLO_HEADER.
+ *
+ * ⚠️ Escrever o cabecalho SO na criacao da aba deixa para sempre sem as colunas
+ * novas a aba que JA existe em producao, e foi exatamente essa a armadilha do
+ * portalAba_ no Hub. A aba InstrutoresSolo nasceu com 4 colunas e ganhou as 4
+ * de inativacao depois, entao o cabecalho tem que ser conferido a cada
+ * ESCRITA. Aqui a leitura e por POSICAO fixa, e o cabecalho e so legibilidade
+ * para quem abre a planilha, entao sobrescrever um titulo divergente e o certo.
+ *
+ * ⚠️ Nunca chamado na leitura: leitura que escreve e escrita disfarcada, e duas
+ * cargas de tela ao mesmo tempo gravariam o cabecalho duas vezes. Na leitura a
+ * coluna ausente volta undefined, que ja significa "ativo".
+ */
+function garantirCabecalhoSoloInva_(aba) {
+  const alvo = INVA_INSTRUTORES_SOLO_HEADER;
+  const faltamColunas = alvo.length - aba.getMaxColumns();
+  if (faltamColunas > 0) aba.insertColumnsAfter(aba.getMaxColumns(), faltamColunas);
+
+  const atual = aba.getRange(1, 1, 1, alvo.length).getValues()[0];
+  for (let i = 0; i < alvo.length; i++) {
+    if (normalizarHeaderInva_(atual[i]) === normalizarHeaderInva_(alvo[i])) continue;
+    aba.getRange(1, i + 1).setValue(alvo[i]).setFontWeight('bold');
+  }
+}
+
 /** A aba de instrutores de solo, criada com cabecalho quando criar=true. */
 function abaInstrutoresSoloInva_(ss, criar) {
   let aba = ss.getSheetByName(INVA_ABA_INSTRUTORES_SOLO);
+  if (aba && criar) garantirCabecalhoSoloInva_(aba);
   if (aba || !criar) return aba;
   aba = ss.insertSheet(INVA_ABA_INSTRUTORES_SOLO);
   aba.getRange(1, 1, 1, INVA_INSTRUTORES_SOLO_HEADER.length)
@@ -2018,11 +2190,12 @@ function linhaDoInstrutorSoloInva_(sheet, nome) {
  * mudanca de base) entrar no FIM da fila. Mesma logica de
  * ultimaOrdemDaBaseInva_, adaptada para colunas fixas.
  */
-function ultimaOrdemDaBaseSoloInva_(sheet, base) {
+function ultimaOrdemDaBaseSoloInva_(sheet, base, ignorarLinha) {
   if (!sheet) return 0;
   const linhas = sheet.getDataRange().getValues();
   let maior = 0;
   for (let i = 1; i < linhas.length; i++) {
+    if (ignorarLinha && (i + 1) === ignorarLinha) continue;
     if (!String(linhas[i][0] || '').trim()) continue;
     const daLinha = normalizarBaseInva_(linhas[i][INVA_SOLO_COL_BASE - 1]) || INVA_BASE_PADRAO;
     if (daLinha !== base) continue;
@@ -2148,7 +2321,13 @@ function instrutoresSoloParaTela_(ss) {
       base: normalizarBaseInva_(linha[INVA_SOLO_COL_BASE - 1]) || INVA_BASE_PADRAO,
       etiquetas: sanearEtiquetasInva_(linha[INVA_SOLO_COL_ETIQUETAS - 1], catalogo),
       comentarios: comentarios[chaveInstrutorInva_(nome)] || [],
-      ordem: Number(linha[INVA_SOLO_COL_ORDEM - 1]) || 0
+      ordem: Number(linha[INVA_SOLO_COL_ORDEM - 1]) || 0,
+      // Coluna ausente (aba criada antes destas 4) volta undefined, que
+      // inativoInva_ le como ativo. Sem migracao a fazer.
+      inativo: inativoInva_(linha[INVA_SOLO_COL_INATIVO - 1]),
+      inativoEm: String(linha[INVA_SOLO_COL_INATIVO_EM - 1] || ''),
+      inativoPor: String(linha[INVA_SOLO_COL_INATIVO_POR - 1] || ''),
+      inativoMotivo: String(linha[INVA_SOLO_COL_INATIVO_MOTIVO - 1] || '')
     });
   });
   return {instrutores: instrutores, etiquetas: catalogo};
@@ -2169,13 +2348,20 @@ function handleAddInstructorSolo(data) {
     const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     const instSheet = abaInstrutoresSoloInva_(ss, true);
 
+    // Mesma razao da versao de voo: o inativo nao aparece na lista, entao a
+    // mensagem tem que dizer que ele existe e onde reativa-lo.
     const chave = nome.toUpperCase();
-    const jaExiste = instSheet.getDataRange().getValues().slice(1)
-      .some(function (row) { return String(row[0] || '').trim().toUpperCase() === chave; });
-    if (jaExiste) {
+    const linhasAtuais = instSheet.getDataRange().getValues();
+    for (let i = 1; i < linhasAtuais.length; i++) {
+      if (String(linhasAtuais[i][0] || '').trim().toUpperCase() !== chave) continue;
+      const estaInativo = inativoInva_(linhasAtuais[i][INVA_SOLO_COL_INATIVO - 1]);
       return createJsonResponse({
         status: 'error',
-        message: 'Já existe um instrutor de solo cadastrado com o nome "' + nome + '".'
+        message: estaInativo
+          ? 'O instrutor de solo "' + nome + '" já existe e está INATIVO. Reative-o no '
+            + 'bloco "Instrutores inativos", no fim da lista: assim ele volta com as '
+            + 'etiquetas e os comentários que já tinha.'
+          : 'Já existe um instrutor de solo cadastrado com o nome "' + nome + '".'
       });
     }
 
@@ -2237,6 +2423,72 @@ function handleSetInstructorBaseSolo(data) {
     return createJsonResponse({
       status: 'success',
       data: {nome: nome, base: base, ordem: ordem}
+    });
+  } catch (error) {
+    return createJsonResponse({status: 'error', message: error.toString()});
+  } finally {
+    try { lock.releaseLock(); } catch (ignore) {}
+  }
+}
+
+/**
+ * Inativa ou reativa um instrutor de solo. Espelho de handleSetInstructorActive,
+ * adaptado para as colunas de posicao fixa desta aba. As mesmas duas decisoes
+ * valem aqui: nada e apagado, e a reativacao poe o instrutor no fim da fila.
+ */
+function handleSetInstructorActiveSolo(data) {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+
+    const nome = String((data || {}).nome || '').trim();
+    const inativar = (data || {}).inativo === true;
+    if (!nome) {
+      return createJsonResponse({status: 'error', message: 'Informe o instrutor.'});
+    }
+
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const instSheet = abaInstrutoresSoloInva_(ss, true);
+    const linha = linhaDoInstrutorSoloInva_(instSheet, nome);
+    if (!linha) {
+      return createJsonResponse({
+        status: 'error',
+        message: 'Instrutor de solo "' + nome + '" não encontrado na planilha.'
+      });
+    }
+
+    const autor = String((data || {}).autor || '').trim();
+    const motivo = String((data || {}).motivo || '')
+      .trim().substring(0, INVA_MOTIVO_INATIVO_MAX);
+    const quando = inativar
+      ? Utilities.formatDate(new Date(), 'America/Sao_Paulo', 'dd/MM/yyyy HH:mm')
+      : '';
+
+    instSheet.getRange(linha, INVA_SOLO_COL_INATIVO).setValue(inativar);
+    gravarTextoInva_(instSheet, linha, INVA_SOLO_COL_INATIVO_EM, quando);
+    gravarTextoInva_(instSheet, linha, INVA_SOLO_COL_INATIVO_POR, inativar ? autor : '');
+    gravarTextoInva_(instSheet, linha, INVA_SOLO_COL_INATIVO_MOTIVO, inativar ? motivo : '');
+
+    let ordem = 0;
+    if (!inativar) {
+      const base = normalizarBaseInva_(
+        instSheet.getRange(linha, INVA_SOLO_COL_BASE).getValue()
+      ) || INVA_BASE_PADRAO;
+      ordem = ultimaOrdemDaBaseSoloInva_(instSheet, base, linha) + 1;
+      instSheet.getRange(linha, INVA_SOLO_COL_ORDEM).setValue(ordem);
+    }
+
+    SpreadsheetApp.flush();
+    return createJsonResponse({
+      status: 'success',
+      data: {
+        nome: nome,
+        inativo: inativar,
+        inativoEm: quando,
+        inativoPor: inativar ? autor : '',
+        inativoMotivo: inativar ? motivo : '',
+        ordem: ordem
+      }
     });
   } catch (error) {
     return createJsonResponse({status: 'error', message: error.toString()});
@@ -2566,6 +2818,10 @@ function handleGetData() {
     const colLiberadoPor = colunas[INVA_COL_LIBERADO_POR];
     const colEtiquetas = colunas[INVA_COL_ETIQUETAS];
     const colOrdem = colunas[INVA_COL_ORDEM];
+    const colInativo = colunas[INVA_COL_INATIVO];
+    const colInativoEm = colunas[INVA_COL_INATIVO_EM];
+    const colInativoPor = colunas[INVA_COL_INATIVO_POR];
+    const colInativoMotivo = colunas[INVA_COL_INATIVO_MOTIVO];
     // Idem: le o catalogo sem criar a aba. Antes do passo de instalacao a
     // lista sai vazia e a tela mostra "nenhuma etiqueta", nao um erro.
     const catalogo = lerEtiquetasInva_(ss);
@@ -2595,7 +2851,14 @@ function handleGetData() {
           ? sanearEtiquetasInva_(String(row[colEtiquetas - 1] || ''), catalogo)
           : [],
         comentarios: comentarios[chaveInstrutorInva_(nome)] || [],
-        ordem: colOrdem ? (Number(row[colOrdem - 1]) || 0) : 0
+        ordem: colOrdem ? (Number(row[colOrdem - 1]) || 0) : 0,
+        // ⚠️ Ativos e inativos viajam JUNTOS, com o sinalizador. Filtrar aqui
+        // deixaria a tela sem como listar quem saiu (e sem como reativar), e
+        // uma segunda rota so para isso custaria outros ~10s de espera.
+        inativo: colInativo ? inativoInva_(row[colInativo - 1]) : false,
+        inativoEm: colInativoEm ? String(row[colInativoEm - 1] || '') : '',
+        inativoPor: colInativoPor ? String(row[colInativoPor - 1] || '') : '',
+        inativoMotivo: colInativoMotivo ? String(row[colInativoMotivo - 1] || '') : ''
       };
     });
 
@@ -2641,14 +2904,29 @@ function handleAddInstructor(data) {
       return createJsonResponse({status: 'error', message: 'Informe o nome do instrutor.'});
     }
 
-    // Recusa nome ja cadastrado, senao um reenvio duplica a linha
+    // Recusa nome ja cadastrado, senao um reenvio duplica a linha.
+    //
+    // ⚠️ A mensagem precisa distinguir o INATIVO. Ele nao aparece na lista,
+    // entao "ja existe um instrutor com esse nome" soa como defeito do sistema
+    // justamente para quem esta tentando trazer de volta quem saiu, e a saida
+    // obvia (cadastrar com o nome levemente diferente) criaria um segundo
+    // instrutor que nao casa com as horas da aba Horas.
     const chave = nome.toUpperCase();
-    const jaExiste = instSheet.getDataRange().getValues().slice(1)
-      .some(function (row) { return String(row[0] || '').trim().toUpperCase() === chave; });
-    if (jaExiste) {
+    const colunasAtuais = mapaColunasInstrutores_(instSheet, false);
+    const colInativoAtual = colunasAtuais[INVA_COL_INATIVO];
+    const linhasAtuais = instSheet.getDataRange().getValues();
+    for (let i = 1; i < linhasAtuais.length; i++) {
+      if (String(linhasAtuais[i][0] || '').trim().toUpperCase() !== chave) continue;
+      const estaInativo = colInativoAtual
+        ? inativoInva_(linhasAtuais[i][colInativoAtual - 1])
+        : false;
       return createJsonResponse({
         status: 'error',
-        message: 'Ja existe um instrutor cadastrado com o nome "' + nome + '".'
+        message: estaInativo
+          ? 'O instrutor "' + nome + '" já existe e está INATIVO. Reative-o no bloco '
+            + '"Instrutores inativos", no fim da lista: assim ele volta com as horas, '
+            + 'as etiquetas e os comentários que já tinha.'
+          : 'Já existe um instrutor cadastrado com o nome "' + nome + '".'
       });
     }
 
