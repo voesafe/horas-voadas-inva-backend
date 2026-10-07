@@ -1231,6 +1231,36 @@ function invaExtrairFaseMissao_(missaoTexto) {
 }
 
 /**
+ * Missoes que pagam IFR pelo NOME da missao (o terceiro pedaco de
+ * "[curso] > [Fase] > [Missao]"), qualquer que seja a fase.
+ *
+ * Existe porque a API de voos nao traz o Tipo da etapa (VFR / IFR Real), e
+ * algumas missoes podem ser feitas nos dois. Decisao do Victor em
+ * 2026-10-07: a operacao cria uma missao com o final "IFR" no CAVOK, e a
+ * missao antiga, sem o final, continua pagando VFR.
+ *
+ * ⚠️ Comparacao pelo NOME INTEIRO, nunca por "termina com IFR": ja existem
+ * missoes como "SIM 05 IFR - Navegacao IFR" que terminam em IFR e sao outra
+ * coisa. Ignora caixa, acento e espaco sobrando.
+ */
+var INVA_MISSOES_IFR_BRUTO = [
+  'Aperfeiçoamento Contínuo IFR'
+];
+
+function invaNormalizarMissaoTexto_(texto) {
+  return invaNormalizarFaseTexto_(texto).normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+
+var INVA_MISSOES_IFR = INVA_MISSOES_IFR_BRUTO.map(invaNormalizarMissaoTexto_);
+
+/** Extrai o terceiro pedaco de "[curso] > [Fase] > [Missao]". '' se nao houver. */
+function invaExtrairNomeMissao_(missaoTexto) {
+  var partes = String(missaoTexto || '').split('>');
+  if (partes.length < 3) return '';
+  return partes.slice(2).join('>').trim();
+}
+
+/**
  * Tipo de simulador pela matricula do equipamento: 'PCATD', 'AATD' ou ''
  * (nao e simulador). Reusa o `normalizarAeronave`, que ja resolve as
  * variantes com o nome da cidade entre parenteses.
@@ -1260,7 +1290,9 @@ function invaClassificarVooPagamento_(aeronave, missaoTexto) {
     return equipamento === 'PCATD' ? INVA_CAT_SIM_PCATD : INVA_CAT_SIM_AATD;
   }
 
-  // Fora de equipamento de simulador: regra por Fase.
+  // Fora de equipamento de simulador: missao com nome IFR, depois a Fase.
+  var chaveMissao = invaNormalizarMissaoTexto_(invaExtrairNomeMissao_(missaoTexto));
+  if (chaveMissao && INVA_MISSOES_IFR.indexOf(chaveMissao) >= 0) return INVA_CAT_IFR;
   if (chaveFase && INVA_FASES_SIMULADOR.indexOf(chaveFase) >= 0) return INVA_CAT_SIM_AATD;
   if (chaveFase && INVA_FASES_IFR.indexOf(chaveFase) >= 0) return INVA_CAT_IFR;
   return INVA_CAT_VFR;
