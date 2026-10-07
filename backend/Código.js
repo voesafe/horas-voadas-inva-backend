@@ -1206,6 +1206,23 @@ var INVA_FASES_SIMULADOR = INVA_FASES_SIMULADOR_BRUTO.map(invaNormalizarFaseText
 var INVA_FASES_IFR = INVA_FASES_IFR_BRUTO.map(invaNormalizarFaseTexto_);
 var INVA_FASE_MOCKUP_SIM_IFR = invaNormalizarFaseTexto_(INVA_FASE_MOCKUP_SIM_IFR_BRUTO);
 
+/**
+ * Correcoes pontuais de categoria, por Id do voo no CAVOK. Vencem a regra
+ * por fase e por equipamento. Uso restrito a voo que a regra classifica
+ * errado e que nao tem como ser corrigido no CAVOK.
+ *
+ * ⚠️ A API de voos NAO traz o Tipo da etapa (VFR / IFR Real): o campo
+ * "Tipo de voo financeiro" vem sempre "VFR", conferido em 2026-10-07. Por
+ * isso uma missao que pode ser VFR ou IFR so e decidida pela fase, e o
+ * caso real IFR precisa entrar aqui ate o CAVOK expor o Tipo na API.
+ */
+var INVA_CATEGORIA_POR_ID_VOO = {
+  // Stephan, 07/09/2026, PS-SFP, 5,9h, "Treinamento Safe > Aperfeicoamento
+  // Continuo". Etapa lancada como IFR Real no CAVOK; a fase sozinha paga VFR.
+  // Pedido do Victor em 2026-10-07, so este voo.
+  '19710': 'IFR'
+};
+
 /** Extrai o segundo pedaco de "[curso] > [Fase] > [Missao]". '' se nao houver. */
 function invaExtrairFaseMissao_(missaoTexto) {
   var partes = String(missaoTexto || '').split('>');
@@ -1363,7 +1380,8 @@ function handleGetHorasCategoriaInva(ano, mes) {
         };
       }
       var minutos = Math.max(0, Number(voo['Tempo total de voo']) || 0);
-      var categoria = invaClassificarVooPagamento_(voo.Aeronave, voo.Missao);
+      var categoria = INVA_CATEGORIA_POR_ID_VOO[String(voo.Id)] ||
+        invaClassificarVooPagamento_(voo.Aeronave, voo.Missao);
       var decimo = invaDecimoHoraCavok_(minutos);
       if (categoria === INVA_CAT_SIM_PCATD) porInstrutor[chave].simuladorPcatdDecimos += decimo;
       else if (categoria === INVA_CAT_SIM_AATD) porInstrutor[chave].simuladorDecimos += decimo;
