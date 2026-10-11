@@ -165,6 +165,10 @@ const FECHAMENTO_AERONAVES = [
 
 function doGet(e) {
   const action = e.parameter.action;
+  if (['sync_cavok', 'sync_cavok_dia'].indexOf(action) >= 0) {
+    try { invaApiExigirHub_(e.parameter.token, action); }
+    catch (erro) { return createJsonResponse({status: 'error', message: erro.message}); }
+  }
   
   if (action === 'get_data') {
     return handleGetData();
@@ -195,6 +199,8 @@ function doGet(e) {
 function doPost(e) {
   try {
     const params = JSON.parse(e.postData.contents);
+    if (params.action === 'integracao_instrutores_v1') return handleIntegracaoInstrutores(params);
+    if (params.action !== 'manutencao') invaApiExigirHub_(params.token, params.action);
     if (params.action === 'add_instructor') {
       return handleAddInstructor(params.data);
     }
@@ -1331,7 +1337,7 @@ function invaApelidosCavok_() {
   var sheet = ss.getSheetByName('Instrutores');
   var colunas = mapaColunasInstrutores_(sheet, false);
   var colApelidos = colunas[INVA_COL_APELIDOS_CAVOK];
-  var mapa = {};
+  var mapa = invaApiMapaNomes_(ss, 'voo', true);
   if (!colApelidos) return mapa;
 
   var dados = sheet.getDataRange().getValues();
@@ -2329,13 +2335,14 @@ function lerComentariosInva_(ss) {
   if (!aba) return {};
   const linhas = aba.getDataRange().getDisplayValues().slice(1);
   const porInstrutor = {};
+  const nomesCanonicos = invaApiMapaNomes_(ss, 'voo', false);
 
   linhas.forEach(function (linha, i) {
     const id = String(linha[0] || '').trim();
     const instrutor = String(linha[1] || '').trim();
     const texto = String(linha[4] || '');
     if (!id || !instrutor || !texto.trim()) return;
-    const chave = chaveInstrutorInva_(instrutor);
+    const chave = chaveInstrutorInva_(nomesCanonicos[invaChaveTexto_(instrutor)] || instrutor);
     if (!porInstrutor[chave]) porInstrutor[chave] = [];
     porInstrutor[chave].push({
       id: id,
@@ -2652,13 +2659,14 @@ function lerComentariosSoloInva_(ss) {
   if (!aba) return {};
   const linhas = aba.getDataRange().getDisplayValues().slice(1);
   const porInstrutor = {};
+  const nomesCanonicos = invaApiMapaNomes_(ss, 'solo', false);
 
   linhas.forEach(function (linha, i) {
     const id = String(linha[0] || '').trim();
     const instrutor = String(linha[1] || '').trim();
     const texto = String(linha[4] || '');
     if (!id || !instrutor || !texto.trim()) return;
-    const chave = chaveInstrutorInva_(instrutor);
+    const chave = chaveInstrutorInva_(nomesCanonicos[invaChaveTexto_(instrutor)] || instrutor);
     if (!porInstrutor[chave]) porInstrutor[chave] = [];
     porInstrutor[chave].push({
       id: id,
@@ -2694,11 +2702,13 @@ function instrutoresSoloParaTela_(ss) {
   const comentarios = lerComentariosSoloInva_(ss);
   const linhas = sheet.getDataRange().getValues().slice(1);
   const instrutores = [];
+  const colsIntegracao = invaApiColunas_(sheet, false);
   linhas.forEach(function (linha) {
     const nome = String(linha[0] || '').trim();
     if (!nome) return;
     instrutores.push({
       nome: nome,
+      ...invaApiMetaLinha_(linha, colsIntegracao),
       base: normalizarBaseInva_(linha[INVA_SOLO_COL_BASE - 1]) || INVA_BASE_PADRAO,
       etiquetas: sanearEtiquetasInva_(linha[INVA_SOLO_COL_ETIQUETAS - 1], catalogo),
       comentarios: comentarios[chaveInstrutorInva_(nome)] || [],
@@ -2731,6 +2741,9 @@ function handleAddInstructorSolo(data) {
 
     // Mesma razao da versao de voo: o inativo nao aparece na lista, entao a
     // mensagem tem que dizer que ele existe e onde reativa-lo.
+    const reservado = invaApiMapaNomes_(ss, 'solo', false)[invaChaveTexto_(nome)];
+    if (reservado && reservado !== nome) return createJsonResponse({status: 'error', message: 'Nome reservado por um cadastro existente ou anterior.'});
+
     const chave = nome.toUpperCase();
     const linhasAtuais = instSheet.getDataRange().getValues();
     for (let i = 1; i < linhasAtuais.length; i++) {
@@ -2759,6 +2772,7 @@ function handleAddInstructorSolo(data) {
     const linhaNova = instSheet.getLastRow();
     gravarTextoInva_(instSheet, linhaNova, INVA_SOLO_COL_BASE, baseNova);
     gravarTextoInva_(instSheet, linhaNova, INVA_SOLO_COL_ETIQUETAS, ids.join(','));
+    invaApiIdentificarLinha_(instSheet, linhaNova);
 
     SpreadsheetApp.flush();
     return createJsonResponse({status: 'success'});
@@ -3211,18 +3225,22 @@ function handleGetData() {
     // Aba ausente devolve {} e cada instrutor sai com a lista vazia.
     const comentarios = lerComentariosInva_(ss);
 
+    const colsIntegracao = invaApiColunas_(instructorsSheet, false);
     const instructors = instructorsSheet.getDataRange().getValues().slice(1);
     const hours = hoursSheet.getDataRange().getValues().slice(1);
 
     const instructorData = instructors.map(row => {
       const nome = row[0];
+      const nomesDoInstrutor = [nome].concat(invaApiAnteriores_(row, colsIntegracao))
+        .map(chaveInstrutorInva_);
       const totalHoras = hours
-        .filter(h => h[0] && h[0].toString().trim().toUpperCase() === nome.toString().trim().toUpperCase())
+        .filter(h => h[0] && nomesDoInstrutor.indexOf(chaveInstrutorInva_(h[0])) >= 0)
         .reduce((sum, h) => sum + Number(h[2] || 0), 0);
 
       return {
         nome: nome,
         tipo: row[1],
+        ...invaApiMetaLinha_(row, colsIntegracao),
         totalHoras: totalHoras.toFixed(1),
         base: (colBase ? normalizarBaseInva_(row[colBase - 1]) : '') || INVA_BASE_PADRAO,
         liberadoOpr: colLiberado ? liberacaoInvaAtiva_(row[colLiberado - 1]) : false,
@@ -3292,6 +3310,9 @@ function handleAddInstructor(data) {
     // justamente para quem esta tentando trazer de volta quem saiu, e a saida
     // obvia (cadastrar com o nome levemente diferente) criaria um segundo
     // instrutor que nao casa com as horas da aba Horas.
+    const reservado = invaApiMapaNomes_(ss, 'voo', true)[invaChaveTexto_(nome)];
+    if (reservado && reservado !== nome) return createJsonResponse({status: 'error', message: 'Nome reservado por um cadastro existente ou anterior.'});
+
     const chave = nome.toUpperCase();
     const colunasAtuais = mapaColunasInstrutores_(instSheet, false);
     const colInativoAtual = colunasAtuais[INVA_COL_INATIVO];
@@ -3332,6 +3353,7 @@ function handleAddInstructor(data) {
     const catalogo = garantirEtiquetasInva_(ss);
     const ids = sanearEtiquetasInva_(data.etiquetas, catalogo);
     gravarEtiquetasDoInstrutorInva_(instSheet, linhaNova, colunas, ids, catalogo);
+    invaApiIdentificarLinha_(instSheet, linhaNova);
 
     const saldoNumero = Number(data.saldoInicial);
     if (isFinite(saldoNumero) && saldoNumero > 0) {
@@ -3599,6 +3621,8 @@ var MANUTENCAO_FUNCOES_INVA = {
   // ⚠️ Este era o passo humano pendente: cria a aba, semeia as 8
   // etiquetas e converte o Tipo de cada instrutor em clt/eventual.
   instalarEtiquetasInva: 'Cria a aba Etiquetas, semeia e migra o Tipo. Idempotente.',
+  instalarIntegracaoInstrutores: 'Cria IDs estaveis para voo e solo. Idempotente, nao configura credenciais.',
+  limparTesteIntegracaoInstrutores: 'Remove ate dois IDs de TESTE API INSTRUTORES sem dados operacionais. Args: [[id1, id2]].',
 
   // Sincronia com o CAVOK
   simularReconciliacaoInva: 'Ensaio da reconciliacao: relata e NAO grava nada.',
