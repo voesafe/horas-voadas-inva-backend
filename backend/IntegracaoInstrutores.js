@@ -158,6 +158,7 @@ function invaApiListar_() {
   }).concat(corpo.dataSolo.map(function (inst) { return Object.assign({}, inst, { modalidade: 'solo' }); }));
   if (instrutores.some(function (inst) { return !inst.id; })) invaApiErro_('INSTALACAO_PENDENTE', 'Execute instalarIntegracaoInstrutores antes de liberar a API.');
   return { instrutores: instrutores, meta: Object.assign({}, corpo.meta, {
+    acessoCompleto: PropertiesService.getScriptProperties().getProperty('INVA_PARCEIRO_ACESSO_COMPLETO') === 'true',
     diretrizEventuais: [
       { curso: 'Curso de Piloto Privado', fases: { 'Pre-Solo': ['PS01', 'PS02', 'PS03', 'PS07', 'PS08', 'PS13'], Aperfeicoamento: ['AP01', 'AP02', 'AP03', 'AP05'], Noturno: ['NOT01'], Navegacao: ['NAV01', 'NAV03', 'NAV04', 'NAV05'] } },
       { curso: 'Curso de Piloto Comercial', fases: { Adaptacao: ['AD01'], Aperfeicoamento: ['AP01'], Navegacao: ['Todas as NAVs, exceto NAV X1 e NAV X2'], Noturno: ['NOT01'] } },
@@ -210,6 +211,10 @@ function invaApiBuscarId_(ss, id) {
 }
 
 function invaApiRepeticao_(ss, requestId, hash) {
+  var requests = ss.getSheetByName('INTEGRACAO_INSTRUTORES_REQUESTS');
+  if (requests && requests.getDataRange().getValues().slice(1).some(function (r) { return r[0] === requestId; })) {
+    invaApiErro_('REQUEST_ID_REUTILIZADO', 'Use um novo requestId para uma operacao diferente.');
+  }
   var log = invaApiLogAba_(ss, false);
   var registro = log ? log.getDataRange().getValues().slice(1).find(function (r) { return r[0] === requestId; }) : null;
   if (registro) {
@@ -238,6 +243,126 @@ function invaApiRepeticao_(ss, requestId, hash) {
     });
   });
   return id;
+}
+
+// Lista fechada das mesmas acoes oferecidas pela pagina. Nunca resolve uma
+// funcao pelo nome recebido e nunca disponibiliza manutencao ou outros modulos.
+function invaApiAcoesCompletas_() {
+  return {
+    add_instructor: [handleAddInstructor, ['nome', 'base', 'etiquetas', 'saldoInicial']],
+    add_instructor_solo: [handleAddInstructorSolo, ['nome', 'base', 'etiquetas']],
+    set_instructor_base: [handleSetInstructorBase, ['instrutorId', 'nome', 'base']],
+    set_instructor_base_solo: [handleSetInstructorBaseSolo, ['instrutorId', 'nome', 'base']],
+    set_instructor_order: [handleSetInstructorOrder, ['base', 'nomes']],
+    set_instructor_order_solo: [handleSetInstructorOrderSolo, ['base', 'nomes']],
+    set_instructor_release: [handleSetInstructorRelease, ['instrutorId', 'nome', 'liberado', 'senha']],
+    set_instructor_active: [handleSetInstructorActive, ['instrutorId', 'nome', 'inativo', 'motivo']],
+    set_instructor_active_solo: [handleSetInstructorActiveSolo, ['instrutorId', 'nome', 'inativo', 'motivo']],
+    save_label: [handleSaveLabel, ['id', 'nome', 'cor']],
+    save_label_solo: [handleSaveLabelSolo, ['id', 'nome', 'cor']],
+    delete_label: [handleDeleteLabel, ['id']],
+    delete_label_solo: [handleDeleteLabelSolo, ['id']],
+    set_instructor_labels: [handleSetInstructorLabels, ['instrutorId', 'nome', 'etiquetas']],
+    set_instructor_labels_solo: [handleSetInstructorLabelsSolo, ['instrutorId', 'nome', 'etiquetas']],
+    add_comment: [handleAddComment, ['instrutorId', 'nome', 'texto']],
+    add_comment_solo: [handleAddCommentSolo, ['instrutorId', 'nome', 'texto']],
+    delete_comment: [handleDeleteComment, ['id']],
+    delete_comment_solo: [handleDeleteCommentSolo, ['id']],
+    sync_cavok: [function () { return reconciliarVoosInva(); }, []]
+  };
+}
+
+function invaApiCanonico_(valor) {
+  if (Array.isArray(valor)) return valor.map(invaApiCanonico_);
+  if (valor && typeof valor === 'object') {
+    var ordenado = {};
+    Object.keys(valor).sort().forEach(function (k) { ordenado[k] = invaApiCanonico_(valor[k]); });
+    return ordenado;
+  }
+  return valor;
+}
+
+function invaApiExecutar_(p) {
+  if (PropertiesService.getScriptProperties().getProperty('INVA_PARCEIRO_ACESSO_COMPLETO') !== 'true') {
+    invaApiErro_('OPERACAO_PROIBIDA', 'Acesso completo de Instrutores nao habilitado.');
+  }
+  var acoes = invaApiAcoesCompletas_();
+  if (!Object.prototype.hasOwnProperty.call(acoes, p.acao)) invaApiErro_('OPERACAO_PROIBIDA', 'Acao fora da pagina Instrutores.');
+  var config = acoes[p.acao];
+  invaApiCampos_(p.dados, config[1]);
+  if (typeof p.requestId !== 'string' || !/^[a-zA-Z0-9_-]{8,120}$/.test(p.requestId)) invaApiErro_('DADOS_INVALIDOS', 'Informe requestId unico, de 8 a 120 caracteres.');
+  var hash = invaApiHash_(JSON.stringify(invaApiCanonico_([p.acao, p.dados, p.autor || ''])));
+  var dados = Object.assign({}, p.dados, { autor: p.autor || 'Parceiro VPS' });
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  if (dados.instrutorId !== undefined) {
+    var alvo = invaApiBuscarId_(ss, String(dados.instrutorId));
+    var modalidade = /_solo$/.test(p.acao) ? 'solo' : 'voo';
+    if (alvo.modalidade !== modalidade || (dados.nome !== undefined && dados.nome !== alvo.row[0])) {
+      invaApiErro_('DADOS_INVALIDOS', 'ID, nome ou modalidade divergentes.');
+    }
+    dados.nome = String(alvo.row[0]);
+    delete dados.instrutorId;
+  }
+  if (config[1].indexOf('base') >= 0 && !normalizarBaseInva_(dados.base)) invaApiErro_('DADOS_INVALIDOS', 'Informe base SJK ou CPQ.');
+  if (config[1].indexOf('nome') >= 0 && dados.nome === undefined) invaApiErro_('DADOS_INVALIDOS', 'Informe nome ou instrutorId.');
+  if (dados.nome !== undefined) dados.nome = invaApiNome_(dados.nome);
+  ['inativo', 'liberado'].forEach(function (k) {
+    if (config[1].indexOf(k) >= 0 && typeof dados[k] !== 'boolean') invaApiErro_('DADOS_INVALIDOS', 'Informe ' + k + ' como booleano.');
+  });
+  if (/^set_instructor_labels/.test(p.acao) && !Array.isArray(dados.etiquetas)) invaApiErro_('DADOS_INVALIDOS', 'Informe etiquetas como lista de IDs.');
+  if (dados.etiquetas !== undefined && (!Array.isArray(dados.etiquetas) || dados.etiquetas.some(function (id) { return typeof id !== 'string'; }))) {
+    invaApiErro_('DADOS_INVALIDOS', 'etiquetas deve ser uma lista de IDs.');
+  }
+  if (config[1].indexOf('nomes') >= 0 && (!Array.isArray(dados.nomes) || !dados.nomes.length || new Set(dados.nomes).size !== dados.nomes.length || dados.nomes.some(function (n) { return typeof n !== 'string'; }))) {
+    invaApiErro_('DADOS_INVALIDOS', 'Informe nomes distintos para ordenar.');
+  }
+  if (dados.saldoInicial !== undefined && (typeof dados.saldoInicial !== 'number' || !isFinite(dados.saldoInicial) || dados.saldoInicial < 0)) {
+    invaApiErro_('DADOS_INVALIDOS', 'Saldo inicial deve ser um numero nao negativo.');
+  }
+
+  // Reserva antes de chamar os handlers, que possuem suas proprias travas.
+  // Se houver interrupcao depois da escrita, o retry nunca repete a mutacao.
+  var lock = LockService.getScriptLock();
+  var linha;
+  var requests;
+  lock.waitLock(30000);
+  try {
+    requests = ss.getSheetByName('INTEGRACAO_INSTRUTORES_REQUESTS');
+    if (requests) {
+      var rows = requests.getDataRange().getValues();
+      for (var i = 1; i < rows.length; i++) {
+        if (rows[i][0] !== p.requestId) continue;
+        if (rows[i][1] !== hash) invaApiErro_('REQUEST_ID_REUTILIZADO', 'Use novo requestId para outra operacao.');
+        if (!rows[i][3]) invaApiErro_('RESULTADO_INDETERMINADO', 'Operacao em andamento ou interrompida. Consulte os dados antes de tentar outra vez.');
+        var repetida = JSON.parse(String(rows[i][3]));
+        repetida.repetida = true;
+        return repetida;
+      }
+    }
+    if (invaApiRepeticao_(ss, p.requestId, hash)) invaApiErro_('REQUEST_ID_REUTILIZADO', 'Use novo requestId para outra operacao.');
+    if (!requests) {
+      requests = ss.insertSheet('INTEGRACAO_INSTRUTORES_REQUESTS');
+      requests.appendRow(['REQUEST_ID', 'HASH', 'ACAO', 'RESPOSTA', 'AUTOR', 'DATA']);
+    }
+    linha = requests.getLastRow() + 1;
+    requests.getRange(linha, 1, 1, 6).setNumberFormat('@').setValues([[
+      p.requestId, hash, p.acao, '', dados.autor, new Date().toISOString()
+    ]]);
+    SpreadsheetApp.flush();
+  } finally { lock.releaseLock(); }
+
+  var resposta = JSON.parse(config[0](dados).getContent());
+  var resultado = { status: resposta.status, apiVersion: 1, repetida: false };
+  if (resposta.status === 'success') resultado.data = resposta.data || resposta;
+  else { resultado.code = 'REGRA_NEGOCIO'; resultado.message = resposta.message || 'Acao recusada.'; }
+  var serializado = JSON.stringify(resultado);
+  if (serializado.length > 45000) serializado = JSON.stringify({ status: resultado.status, apiVersion: 1, repetida: false, data: { consultarNovamente: true } });
+  lock.waitLock(30000);
+  try {
+    requests.getRange(linha, 4).setNumberFormat('@').setValue(serializado);
+    SpreadsheetApp.flush();
+  } finally { lock.releaseLock(); }
+  return resultado;
 }
 
 function invaApiGravar_(p) {
@@ -314,8 +439,10 @@ function invaApiGravar_(p) {
 function handleIntegracaoInstrutores(p) {
   try {
     invaApiAutenticar_(p.chave);
-    invaApiCampos_(p, ['action', 'chave', 'operacao', 'dados', 'requestId', 'autor']);
+    invaApiCampos_(p, ['action', 'chave', 'operacao', 'acao', 'dados', 'requestId', 'autor']);
     if (p.autor !== undefined && (typeof p.autor !== 'string' || p.autor.length > 200)) invaApiErro_('DADOS_INVALIDOS', 'Autor invalido.');
+    if (p.operacao === 'executar') return createJsonResponse(invaApiExecutar_(p));
+    if (p.acao !== undefined) invaApiErro_('CAMPO_PROIBIDO', 'acao somente e aceita em executar.');
     if (p.operacao === 'listar') {
       if (p.dados !== undefined) invaApiCampos_(p.dados, []);
       return createJsonResponse({ status: 'success', apiVersion: 1, data: invaApiListar_() });
