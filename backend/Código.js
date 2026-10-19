@@ -156,6 +156,7 @@ const FECHAMENTO_AERONAVES = [
   { base: 'SJK', tipo: 'PS-SFE', cotista: true },
   { base: 'SJK', tipo: 'PS-SFH', cotista: true },
   { base: 'SJK', tipo: 'PS-SFI', cotista: true },
+  { base: 'SJK', tipo: 'PS-SDC', cotista: true },
   { base: 'CPQ', tipo: 'PS-SFJ', cotista: false },
   { base: 'CPQ', tipo: 'PS-SFL', cotista: false },
   { base: 'SJK', tipo: 'PS-SFP', cotista: false },
@@ -1480,6 +1481,7 @@ function consolidarFechamento(flights) {
   let ignorados = 0;
   let excluidosSemAluno = 0;
   let excluidosAdministrativo = 0;
+  let excluidosAlunoPsSdc = 0;
   let considerados = 0;
 
   flights.forEach(flight => {
@@ -1498,6 +1500,10 @@ function consolidarFechamento(flights) {
       excluidosSemAluno += minutos;
     } else if (aluno === 'VOO ADMINISTRATIVO - SAFE') {
       excluidosAdministrativo += minutos;
+    } else if (modelo.tipo === 'PS-SDC' &&
+      aluno.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ') ===
+      'RENATO DE CAMARGO GABAS') {
+      excluidosAlunoPsSdc += minutos;
     } else {
       modelo.minutosCotista += minutos;
     }
@@ -1521,7 +1527,8 @@ function consolidarFechamento(flights) {
       voosIgnorados: ignorados,
       horasExcluidasSemAluno: arredondarUmaCasa(excluidosSemAluno / 60),
       horasExcluidasAdministrativo:
-        arredondarUmaCasa(excluidosAdministrativo / 60)
+        arredondarUmaCasa(excluidosAdministrativo / 60),
+      horasExcluidasAlunoPsSdc: arredondarUmaCasa(excluidosAlunoPsSdc / 60)
     }
   };
 }
